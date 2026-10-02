@@ -1559,6 +1559,9 @@ button.thumb:not(:disabled):hover {
   pointer-events: all;
   cursor: pointer;
 }
+.page-layer[data-tool="select"] .ann.selected {
+  cursor: move;
+}
 .page-layer[data-tool="select"] .ann:hover .ann-hit {
   stroke: var(--accent);
   stroke-width: 1;
@@ -1574,6 +1577,32 @@ button.thumb:not(:disabled):hover {
   to {
     stroke-dashoffset: -14;
   }
+}
+/* Grab handle to drag the text box around the page. */
+.box-grip {
+  position: absolute;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.2);
+  transition: transform 0.15s;
+}
+.box-grip:hover {
+  transform: scale(1.12);
+}
+.box-grip.dragging {
+  cursor: grabbing;
+  transform: scale(1.18);
 }
 .text-box {
   position: absolute;

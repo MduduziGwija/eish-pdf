@@ -87,6 +87,8 @@ export interface PaintOptions {
   strike?: boolean;
   /** Reuse the scan's own letters and words (default true). */
   letters?: boolean;
+  /** Move the new text this far (page points) from where the old line was. */
+  offset?: [number, number];
 }
 
 export interface Painted {
@@ -727,9 +729,11 @@ export class ScanPicture {
     const lineBox = this.boxPx(line.bbox, 2);
     const oldCover = this.coverage(lineBox, lumOf(look.paper), lumOf(look.ink));
     const oldInk = inkBox(oldCover, 0.3) ?? [0, 0, lineBox[2] - lineBox[0], lineBox[3] - lineBox[1]];
-    const baseline = this.toPx([0, line.origin[1]])[1];
-    // The new text's first ink lines up with the old line's first ink.
-    const originX = lineBox[0] + oldInk[0] - (placedWords[0]?.x0 ?? 0);
+    let baseline = this.toPx([0, line.origin[1]])[1];
+    // The new text's first ink lines up with the old line's first ink (unless moved).
+    const [dx, dy] = opts.offset ? [opts.offset[0] / this.matrix[0], opts.offset[1] / this.matrix[3]] : [0, 0];
+    const originX = lineBox[0] + oldInk[0] - (placedWords[0]?.x0 ?? 0) + dx;
+    baseline += dy;
 
     // The piece of the scan that changes.
     const pad = Math.ceil(sigma * 3 + pen.stroke + 3 + Math.abs(pen.shear) * pen.px);

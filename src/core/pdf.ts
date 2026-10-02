@@ -202,6 +202,8 @@ export type Annotation =
       background?: Rgb;
       /** Redrawn to look scanned: these edited pixels replace the old ones instead of text being drawn. */
       scan?: ScanEdit;
+      /** The new text moved this far from where the old line was (the old line is still removed). */
+      shift?: [number, number];
     };
 
 /** A line of a scan, redrawn in the scan's own look (see src/scan). */
@@ -333,7 +335,7 @@ function applyReplacements(pdf: mupdf.PDFDocument, index: number, all: Replace[]
     writeRuns(
       pdf,
       index,
-      replaces.filter((a) => !a.scan && a.text.trim()).map((a) => ({ text: a.text, origin: a.origin, size: a.size, color: a.color, font: a.font, underline: a.underline, strike: a.strike })),
+      replaces.filter((a) => !a.scan && a.text.trim()).map((a) => ({ text: a.text, origin: [a.origin[0] + (a.shift?.[0] ?? 0), a.origin[1] + (a.shift?.[1] ?? 0)] as [number, number], size: a.size, color: a.color, font: a.font, underline: a.underline, strike: a.strike })),
       fonts,
     );
   } finally {

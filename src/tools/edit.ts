@@ -49,7 +49,7 @@ const TOOLS: { id: Tool; label: string; hint: string; glyph: string }[] = [
   { id: "sign", label: "Sign", hint: "Draw, type or upload your signature, then place and resize it", glyph: "✍" },
   { id: "highlight", label: "Highlight", hint: "Drag over what matters", glyph: "▰" },
   { id: "erase", label: "Erase", hint: "Drag over content to remove it for real", glyph: "⌫" },
-  { id: "select", label: "Select", hint: "Click an edit to select it. Drag pictures to move them, pull a corner to resize. Delete removes.", glyph: "➚" },
+  { id: "select", label: "Select", hint: "Click an edit to select it, then drag it (or use the arrow keys) to move it. Pull a picture's corner to resize. Delete removes.", glyph: "➚" },
 ];
 
 export function editTool(): HTMLElement {
@@ -77,6 +77,7 @@ export function editTool(): HTMLElement {
   let matchScan = true;
   /** "auto", or the CSS name of a font picked for redrawing scanned lines. */
   let scanFont = "auto";
+  const redraws = new Map<string, number>();
   const scanRenders = new Map<number, { png: Uint8Array; scale: number }>();
   const scanPictures = new Map<number, Promise<ScanPicture>>();
   try {
@@ -467,7 +468,8 @@ export function editTool(): HTMLElement {
       } else if (a.type === "replace") {
         g.append(rect(a.rect, "cover"));
         const f: Fmt = { ...DEFAULT_FMT, family: a.font.family, bold: a.font.bold, italic: a.font.italic, size: a.size, color: a.color, underline: !!a.underline, strike: !!a.strike };
-        g.append(svgText([a.text], f, a.rect, [a.origin[1]], a.origin[0]));
+        const [sx, sy] = a.shift ?? [0, 0];
+        g.append(svgText([a.text], f, a.rect, [a.origin[1] + sy], a.origin[0] + sx));
       } else {
         g.append(rect(a.rect));
       }
@@ -805,6 +807,28 @@ export function editTool(): HTMLElement {
     render();
   }
 
+  /** Moves an edit (scanned lines are redrawn in the scan's look at their new spot). */
+  function moveEdit(p: PageEdit, index: number, dx: number, dy: number) {
+    const ann = p.annotations[index];
+    const moved = movedBy(ann, dx, dy);
+    if (moved.type === "replace" && moved.scan) {
+      void redrawMovedScan(p, moved);
+      return;
+    }
+    commit(() => (p.annotations[index] = moved));
+  }
+
+  async function redrawMovedScan(p: PageEdit, ann: ReplaceAnn) {
+    const lines = await linesOf(p.source);
+    const line = lines.find((l) => sameBox(l.bbox, ann.rect));
+    if (!line) return;
+    const detected: Fmt = { ...DEFAULT_FMT, family: line.font.family, bold: line.font.bold, italic: line.font.italic, size: line.size, color: line.color };
+    const f: Fmt = { ...detected, family: ann.font.family, bold: ann.font.bold, italic: ann.font.italic, size: ann.size, color: ann.color, underline: !!ann.underline, strike: !!ann.strike };
+    const { scan: _old, ...plain } = ann;
+    const scanLook = lookOf(p.source, line);
+    await redrawScanned(p, line, plain, f, detected, scanLook);
+  }
+
   function deleteSelected() {
     if (view.kind !== "page" || selected === undefined) return;
     const p = pages[view.index];
@@ -840,9 +864,42 @@ export function editTool(): HTMLElement {
       if (tool === "select") {
         const hitIndex = annotationAt(e);
         const ann = hitIndex !== undefined ? p.annotations[hitIndex] : undefined;
-        if (ann?.type !== "image") {
+        if (!ann || (ann.type === "replace" && p.rotate !== 0)) {
           selected = hitIndex;
           render();
+          return;
+        }
+        if (ann.type !== "image" || !(e.target as SVGElement).dataset?.corner) {
+          // Drag any edit to a new spot (pictures resize from their corners, below).
+          e.preventDefault();
+          selected = hitIndex;
+          const index = hitIndex!;
+          const annLayer = layer.querySelector<SVGGElement>(".ann-layer")!;
+          layer.setPointerCapture(e.pointerId);
+          let delta: Point = [0, 0];
+          const drag = (ev: PointerEvent) => {
+            const [px, py] = toPoint(ev);
+            delta = [px - start[0], py - start[1]];
+            if (ann.type === "replace" && ann.scan) {
+              // A scanned line is redrawn when dropped; until then, slide the piece along.
+              const g = annLayer.querySelector<SVGGElement>(`g.ann[data-index="${index}"]`);
+              g?.setAttribute("transform", `translate(${delta[0]} ${delta[1]})`);
+              return;
+            }
+            p.annotations[index] = movedBy(ann, delta[0], delta[1]);
+            drawAnnotations(annLayer, p, selected);
+          };
+          const drop = () => {
+            layer.removeEventListener("pointermove", drag);
+            layer.removeEventListener("pointerup", drop);
+            layer.removeEventListener("pointercancel", drop);
+            p.annotations[index] = ann;
+            if (Math.abs(delta[0]) + Math.abs(delta[1]) < 0.5) return render();
+            moveEdit(p, index, delta[0], delta[1]);
+          };
+          layer.addEventListener("pointermove", drag);
+          layer.addEventListener("pointerup", drop);
+          layer.addEventListener("pointercancel", drop);
           return;
         }
         // Move or resize a picture.
@@ -965,16 +1022,21 @@ export function editTool(): HTMLElement {
    * styled while the format bar changes, and saves on blur, Ctrl+Enter or a
    * click elsewhere (Esc cancels).
    */
-  function openBox(stage: HTMLElement, W: number, f: Fmt, initial: string, origin: () => Point, save: (text: string, f: Fmt) => void, singleLine: boolean) {
+  function openBox(stage: HTMLElement, W: number, f: Fmt, initial: string, origin: () => Point, save: (text: string, f: Fmt, offset: Point) => void, singleLine: boolean, startOffset: Point = [0, 0]) {
     const box = h("textarea.text-box", { rows: 1, "aria-label": "Text", spellcheck: true }) as HTMLTextAreaElement;
     box.value = initial;
+    // Drag the grip to move the box (and its text) anywhere on the page.
+    const grip = h("span.box-grip", { title: "Drag to move", "aria-label": "Drag to move the text", role: "button" }, "✥");
+    const offset: Point = [...startOffset];
     const pxPerPt = () => stage.getBoundingClientRect().width / W;
     const place = () => {
       const k = pxPerPt();
-      const [x, y] = origin();
+      const [x, y] = [origin()[0] + offset[0], origin()[1] + offset[1]];
       styleElement(box, f, k);
       box.style.left = `${x * k}px`;
       box.style.top = `${y * k}px`;
+      grip.style.left = `${x * k - 22}px`;
+      grip.style.top = `${y * k - 2}px`;
       const lines = box.value.split("\n");
       const widest = Math.max(...lines.map((l) => measure(l || " ", f)));
       box.style.width = `${Math.max(40, (widest + 12) * k)}px`;
@@ -982,8 +1044,33 @@ export function editTool(): HTMLElement {
       box.style.textAlign = f.align;
     };
     box.addEventListener("input", place);
+    grip.addEventListener("pointerdown", (e) => {
+      // Keep typing focus in the box while dragging.
+      e.preventDefault();
+      e.stopPropagation();
+      grip.setPointerCapture(e.pointerId);
+      const start: Point = [e.clientX, e.clientY];
+      const from: Point = [...offset];
+      grip.classList.add("dragging");
+      const move = (ev: PointerEvent) => {
+        const k = pxPerPt();
+        offset[0] = from[0] + (ev.clientX - start[0]) / k;
+        offset[1] = from[1] + (ev.clientY - start[1]) / k;
+        place();
+      };
+      const up = () => {
+        grip.classList.remove("dragging");
+        grip.removeEventListener("pointermove", move);
+        grip.removeEventListener("pointerup", up);
+        grip.removeEventListener("pointercancel", up);
+        box.focus();
+      };
+      grip.addEventListener("pointermove", move);
+      grip.addEventListener("pointerup", up);
+      grip.addEventListener("pointercancel", up);
+    });
     place();
-    stage.append(box);
+    stage.append(box, grip);
     box.focus();
     box.setSelectionRange(box.value.length, box.value.length);
 
@@ -995,8 +1082,9 @@ export function editTool(): HTMLElement {
       done = true;
       if (active?.finish === finish) active = undefined;
       box.remove();
+      grip.remove();
       syncBar();
-      if (doSave) save(box.value.replace(/\s+$/, ""), f);
+      if (doSave) save(box.value.replace(/\s+$/, ""), f, offset);
     };
     active = { fmt: f, finish, place };
     syncBar();
@@ -1015,7 +1103,16 @@ export function editTool(): HTMLElement {
         e.stopPropagation(); // Only cancel the box, don't also leave full screen.
         finish(false);
       }
-      else if (e.key === "Enter" && (e.ctrlKey || e.metaKey || singleLine)) {
+      else if (e.altKey && e.key.startsWith("Arrow")) {
+        // Alt + arrows nudge the box (Shift for bigger steps).
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : 1;
+        if (e.key === "ArrowLeft") offset[0] -= step;
+        if (e.key === "ArrowRight") offset[0] += step;
+        if (e.key === "ArrowUp") offset[1] -= step;
+        if (e.key === "ArrowDown") offset[1] += step;
+        place();
+      } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey || singleLine)) {
         e.preventDefault();
         finish(true);
       } else if ((e.ctrlKey || e.metaKey) && ["b", "i", "u"].includes(e.key.toLowerCase())) {
@@ -1038,12 +1135,15 @@ export function editTool(): HTMLElement {
       f,
       prev?.text ?? "",
       () => topLeft,
-      (text, f) => {
+      (text, f, offset) => {
         if (!prev) fmt = { ...f }; // Next new text starts with the same look, like Word.
+        const moved = Math.abs(offset[0]) + Math.abs(offset[1]) > 0.1;
+        topLeft[0] += offset[0];
+        topLeft[1] += offset[1];
         const lines = text.split("\n");
         const width = Math.max(...lines.map((l) => measure(l, f))) + 8;
         const rectBox: Box = [topLeft[0], topLeft[1], Math.min(W, topLeft[0] + width), Math.min(H, topLeft[1] + lines.length * f.size * LINE_HEIGHT + 6)];
-        if (prev && text === prev.text && JSON.stringify(fmtOf(prev)) === JSON.stringify(f)) return;
+        if (prev && !moved && text === prev.text && JSON.stringify(fmtOf(prev)) === JSON.stringify(f)) return;
         if (!prev && !text) return;
         commit(() => {
           if (existing !== undefined) p.annotations.splice(existing, 1);
@@ -1068,8 +1168,9 @@ export function editTool(): HTMLElement {
       f,
       prev?.text ?? line.text,
       () => [line.origin[0] - 2, line.origin[1] - f.size * 0.9 - 2] as Point,
-      (text, f) => {
-        const unchanged = text === line.text && JSON.stringify(f) === JSON.stringify(detected);
+      (text, f, offset) => {
+        const shifted = Math.abs(offset[0]) + Math.abs(offset[1]) > 0.1;
+        const unchanged = text === line.text && JSON.stringify(f) === JSON.stringify(detected) && !shifted;
         if (unchanged && existing === undefined) return;
         // Keep the document's own font unless the family or weight was changed.
         const sameFace = f.family === line.font.family && f.bold === line.font.bold && f.italic === line.font.italic;
@@ -1084,6 +1185,7 @@ export function editTool(): HTMLElement {
           underline: f.underline,
           strike: f.strike,
           ...(line.background ? { background: line.background } : {}),
+          ...(shifted ? { shift: [offset[0], offset[1]] as [number, number] } : {}),
         };
         if (scanLook && !unchanged) {
           void redrawScanned(p, line, plain, f, detected, scanLook);
@@ -1096,11 +1198,16 @@ export function editTool(): HTMLElement {
         if (!unchanged) mascot.flash("happy", pick(["Sho! Nobody will know.", "Smooth, mfowethu.", "Same font, new words. Kwaai!"]), 1800);
       },
       true,
+      prev?.shift,
     );
   }
 
   /** Redraws a scanned line in the scan's own look and puts it in place of the old one. */
   async function redrawScanned(p: PageEdit, line: EditLine, plain: ReplaceAnn, f: Fmt, detected: Fmt, scanLook: ReturnType<typeof lookOf>) {
+    // Only the latest redraw of a line counts (dragging or nudging can start several).
+    const key = `${p.source}|${line.bbox.join()}`;
+    const ticket = (redraws.get(key) ?? 0) + 1;
+    redraws.set(key, ticket);
     const place = (a: ReplaceAnn) =>
       commit(() => {
         const at = p.annotations.findIndex((x) => x.type === "replace" && sameBox(x.rect, line.bbox));
@@ -1117,10 +1224,11 @@ export function editTool(): HTMLElement {
         color: f.color.every((v, i) => Math.abs(v - detected.color[i]) < 0.01) ? undefined : f.color,
         style: faceChanged ? { generic: f.family, bold: f.bold, italic: f.italic } : undefined,
         family: scanFont !== "auto" ? scanFont : undefined,
+        offset: plain.shift,
         underline: f.underline,
         strike: f.strike,
       });
-      if (!pages.includes(p)) return;
+      if (!pages.includes(p) || redraws.get(key) !== ticket) return;
       const id = `scan-${++pictureCount}`;
       pictures.set(id, { png: painted.png, url: URL.createObjectURL(new Blob([painted.png as BlobPart], { type: "image/png" })) });
       place({
@@ -1317,6 +1425,15 @@ export function editTool(): HTMLElement {
     } else if (mod && e.key === "0") {
       e.preventDefault();
       section.querySelector<HTMLButtonElement>(".zoom-label")?.click();
+    } else if (e.key.startsWith("Arrow") && selected !== undefined && view.kind === "page") {
+      // Arrows nudge the selected edit (Shift for bigger steps).
+      e.preventDefault();
+      const p = pages[view.index];
+      const ann = p.annotations[selected];
+      if (!ann || (ann.type === "replace" && p.rotate !== 0)) return;
+      const step = e.shiftKey ? 10 : 1;
+      const [dx, dy] = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key as "ArrowLeft"] ?? [0, 0];
+      moveEdit(p, selected, dx, dy);
     } else if ((e.key === "Delete" || e.key === "Backspace") && selected !== undefined) {
       e.preventDefault();
       deleteSelected();
@@ -1367,7 +1484,26 @@ function boxOf(a: Point, b: Point): Box {
   return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
 }
 
+/** An edit moved by (dx, dy) points. */
+function movedBy(a: Annotation, dx: number, dy: number): Annotation {
+  const r = (b: Box): Box => [b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy];
+  switch (a.type) {
+    case "ink":
+      return { ...a, strokes: a.strokes.map((st) => st.map(([x, y]) => [x + dx, y + dy] as Point)) };
+    case "replace":
+      // The old line stays removed; only the new text moves.
+      return { ...a, shift: [(a.shift?.[0] ?? 0) + dx, (a.shift?.[1] ?? 0) + dy] };
+    default:
+      return { ...a, rect: r(a.rect) };
+  }
+}
+
 function bounds(a: Annotation): Box {
+  if (a.type === "replace") {
+    if (a.scan) return a.scan.box;
+    const [dx, dy] = a.shift ?? [0, 0];
+    return [Math.min(a.rect[0], a.rect[0] + dx), Math.min(a.rect[1], a.rect[1] + dy), Math.max(a.rect[2], a.rect[2] + dx), Math.max(a.rect[3], a.rect[3] + dy)];
+  }
   if (a.type !== "ink") return a.rect;
   const pts = a.strokes.flat();
   const xs = pts.map((p) => p[0]);
