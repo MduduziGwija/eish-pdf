@@ -5,7 +5,7 @@ import { range } from "./ranges";
 import { baselineOf } from "./layout";
 
 export { baselineOf, LINE_HEIGHT } from "./layout";
-import { appendContent, collectFonts, toUserSpace, writeRuns, type FontStyle } from "./text";
+import { addOcrLayer, appendContent, collectFonts, toUserSpace, writeRuns, type FontStyle, type OcrWord } from "./text";
 
 export { parsePageRanges, range } from "./ranges";
 
@@ -187,7 +187,19 @@ export type Annotation =
   /** A picture (or signature) stretched to `rect`; `image` keys into the images passed to edit(). */
   | { type: "image"; rect: Box; image: string; signature?: boolean }
   /** Swaps an existing line of text for new text in the same style and place. */
-  | { type: "replace"; rect: Box; text: string; origin: [number, number]; size: number; color: Rgb; font: FontStyle; underline?: boolean; strike?: boolean };
+  | {
+      type: "replace";
+      rect: Box;
+      text: string;
+      origin: [number, number];
+      size: number;
+      color: Rgb;
+      font: FontStyle;
+      underline?: boolean;
+      strike?: boolean;
+      /** Paper colour to paint over the old text (scanned pages); none = leave blank. */
+      background?: Rgb;
+    };
 
 /** Word-style formatting for a whole text box. */
 export interface TextStyle {
@@ -205,6 +217,8 @@ export interface TextStyle {
 export interface PageEdit {
   /** 0-based page in the original file. */
   source: number;
+  /** Words read by OCR (original page coordinates): saved as invisible text so a scanned page becomes searchable. */
+  ocr?: OcrWord[];
   /** Extra clockwise rotation. */
   rotate: Rotation;
   annotations: Annotation[];
@@ -259,6 +273,21 @@ function applyReplacements(pdf: mupdf.PDFDocument, index: number, replaces: Repl
       page.createAnnotation("Redact").setRect([x0, y0 + inset, x1, y1 - inset]);
     }
     page.applyRedactions(false, 2, 1, 0);
+    // On scans, paint the removed area in the paper's colour so it blends in.
+    const patches = replaces.filter((a) => a.background);
+    if (patches.length) {
+      const map = toUserSpace(page);
+      let ops = "";
+      for (const a of patches) {
+        const [x0, y0, x1, y1] = normalise(a.rect);
+        const pad = 1;
+        const p0 = map.point([x0 - pad, y0 - pad]);
+        const p1 = map.point([x1 + pad, y1 + pad]);
+        const [rx, ry] = [Math.min(p0[0], p1[0]), Math.min(p0[1], p1[1])];
+        ops += `${a.background!.map((v) => v.toFixed(3)).join(" ")} rg ${rx.toFixed(2)} ${ry.toFixed(2)} ${Math.abs(p1[0] - p0[0]).toFixed(2)} ${Math.abs(p1[1] - p0[1]).toFixed(2)} re f\n`;
+      }
+      appendContent(pdf, pdf.findPage(index), ops);
+    }
     writeRuns(
       pdf,
       index,
@@ -388,6 +417,11 @@ export function edit(input: PdfInput, pages: PageEdit[], images: ImageStore = {}
       const replaces = p.annotations.filter((a): a is Replace => a.type === "replace");
       const others = p.annotations.filter((a) => a.type !== "replace");
       if (replaces.length) applyReplacements(pdf, p.source, replaces);
+      // OCR'd words become invisible, searchable text, except where text was replaced.
+      if (p.ocr?.length) {
+        const overlaps = (w: OcrWord) => replaces.some((r) => w.bbox[0] < r.rect[2] && w.bbox[2] > r.rect[0] && w.bbox[1] < r.rect[3] && w.bbox[3] > r.rect[1]);
+        addOcrLayer(pdf, p.source, p.ocr.filter((w) => !overlaps(w)));
+      }
       // Then rotate: other annotations are positioned on the rotated page, and
       // MuPDF keeps added text upright on rotated pages.
       if (p.rotate) {

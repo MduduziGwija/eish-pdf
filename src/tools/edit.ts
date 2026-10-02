@@ -1,7 +1,9 @@
 import { pdf, PdfError } from "../core/client";
 import { baselineOf, LINE_HEIGHT } from "../core/layout";
 import type { Annotation, PageEdit, PageSize, Rgb, Rotation } from "../core/pdf";
-import type { TextLine } from "../core/text";
+import type { OcrWord, TextLine } from "../core/text";
+import { linesFromBlocks, type TesseractBlock } from "../core/ocrwords";
+import { startOcr, type OcrEngine } from "../ocr/engine";
 import { h, icon, reducedMotion, sleep, svg } from "../ui/dom";
 import { baseName, dropzone, formatSize, plural, readBytes, saveFile } from "../ui/files";
 import { celebrate, mascot, oops, pick, reveal } from "../ui/fun";
@@ -16,6 +18,8 @@ type Point = [number, number];
 type Box = [number, number, number, number];
 type TextAnn = Extract<Annotation, { type: "text" }>;
 type ReplaceAnn = Extract<Annotation, { type: "replace" }>;
+/** A line of the page's text; lines read from a scan also carry the paper colour. */
+type EditLine = TextLine & { background?: Rgb; scanned?: boolean };
 
 interface Doc {
   file: File;
@@ -61,7 +65,11 @@ export function editTool(): HTMLElement {
   let zoom = 1;
   let enlarged = false;
   let active: Active | undefined;
-  const lineCache = new Map<number, Promise<TextLine[]>>();
+  const lineCache = new Map<number, Promise<EditLine[]>>();
+  // Scanned pages are read (OCR) the first time someone edits their text.
+  const scanWords = new Map<number, OcrWord[]>();
+  const scanProgress = new Map<number, number>();
+  let ocrEngine: Promise<OcrEngine> | undefined;
   // Pictures placed in this edit, by id (annotations refer to them by id).
   const pictures = new Map<string, { png: Uint8Array; url: string }>();
   let pictureCount = 0;
@@ -135,14 +143,67 @@ export function editTool(): HTMLElement {
     input.focus();
   }
 
-  const linesOf = (source: number) => {
+  const linesOf = (source: number): Promise<EditLine[]> => {
     let lines = lineCache.get(source);
     if (!lines) {
-      lines = pdf.lines(doc!.session, source);
+      // No text on the page usually means it's a scan: read it on the spot.
+      lines = pdf.lines(doc!.session, source).then((found) => (found.length ? found : readScannedPage(source)));
+      lines.catch(() => lineCache.delete(source));
       lineCache.set(source, lines);
     }
     return lines;
   };
+
+  async function readScannedPage(source: number): Promise<EditLine[]> {
+    const session = doc!.session;
+    const { width, height } = doc!.sizes[source];
+    const scale = Math.min(300 / 72, 3600 / Math.max(width, height));
+    scanProgress.set(source, 0);
+    showScanState(source);
+    mascot.mood("read");
+    mascot.say("A scanned page! Reading it so you can edit it…");
+    try {
+      ocrEngine ??= startOcr("eng");
+      const engine = await ocrEngine;
+      const png = await pdf.render(session, source, scale);
+      const blocks = await engine.read(png, (p) => {
+        scanProgress.set(source, p);
+        showScanState(source);
+      });
+      const found = linesFromBlocks(blocks as TesseractBlock[], scale);
+      const colours = await sampleColours(png, found.map((l) => l.bbox), scale);
+      if (doc?.session !== session) return [];
+      scanWords.set(source, found.flatMap((l) => l.words));
+      mascot.flash("happy", found.length ? `Sho! I read ${plural(found.length, "line")}. Click one to change it.` : "Eish, I couldn't find any text on this page.", 3200);
+      return found.map((l, i) => ({
+        text: l.text,
+        bbox: l.bbox,
+        origin: l.origin,
+        size: l.size,
+        color: colours[i].ink,
+        background: colours[i].paper,
+        font: { name: "", family: "sans", bold: false, italic: false },
+        scanned: true,
+      }));
+    } catch (err) {
+      ocrEngine = undefined;
+      mascot.flash("eish", "Eish, I couldn't read this scanned page.", 3000);
+      throw err;
+    } finally {
+      scanProgress.delete(source);
+      showScanState(source);
+    }
+  }
+
+  /** Shows "reading…" progress on the page being edited, if it's this one. */
+  function showScanState(source: number) {
+    if (view.kind !== "page" || pages[view.index]?.source !== source) return;
+    const stage = workspace.querySelector<HTMLElement>(".stage");
+    const hint = workspace.querySelector<HTMLElement>(".tool-hint");
+    const progress = scanProgress.get(source);
+    stage?.classList.toggle("scanning", progress !== undefined);
+    if (progress !== undefined && hint && tool === "retext") hint.textContent = `Scanned page: reading it so you can edit it… ${Math.round(progress * 100)}%`;
+  }
 
   // --- History -------------------------------------------------------------
 
@@ -564,12 +625,13 @@ export function editTool(): HTMLElement {
     }
 
     if (tool === "retext" && !rotatedRetext) {
+      requestAnimationFrame(() => showScanState(p.source));
       linesOf(p.source)
         .then((lines) => {
           if (!stage.isConnected) return;
-          if (lines.length === 0) {
-            options.querySelector(".tool-hint")!.textContent = "No selectable text on this page. If it's a scan, run it through OCR first.";
-          }
+          const hint = options.querySelector(".tool-hint")!;
+          if (lines.length === 0) hint.textContent = "No text found on this page, even after reading it.";
+          else if (lines.some((l) => l.scanned)) hint.textContent = "Scanned page: click a line to change it. The new text matches its size, ink and paper colour.";
           lines.forEach((line, k) => {
             const r = rect(line.bbox, "line-box");
             r.dataset.line = String(k);
@@ -869,7 +931,7 @@ export function editTool(): HTMLElement {
     );
   }
 
-  function openReplaceBox(stage: HTMLElement, p: PageEdit, W: number, line: TextLine, existing?: number) {
+  function openReplaceBox(stage: HTMLElement, p: PageEdit, W: number, line: EditLine, existing?: number) {
     const prev = existing !== undefined ? (p.annotations[existing] as ReplaceAnn) : undefined;
     const detected: Fmt = { ...DEFAULT_FMT, family: line.font.family, bold: line.font.bold, italic: line.font.italic, size: line.size, color: line.color };
     const f: Fmt = prev ? { ...detected, family: prev.font.family, bold: prev.font.bold, italic: prev.font.italic, size: prev.size, color: prev.color, underline: !!prev.underline, strike: !!prev.strike } : detected;
@@ -898,6 +960,7 @@ export function editTool(): HTMLElement {
               font: { name: sameFace ? line.font.name : "", family: f.family, bold: f.bold, italic: f.italic },
               underline: f.underline,
               strike: f.strike,
+              ...(line.background ? { background: line.background } : {}),
             });
           }
         });
@@ -997,7 +1060,7 @@ export function editTool(): HTMLElement {
     closeActive();
     saveBtn.disabled = true;
     try {
-      let [bytes] = await mascot.busy(Promise.all([pdf.edit({ bytes: doc.bytes, password: doc.password }, pages, usedPictures()), sleep(700)]));
+      let [bytes] = await mascot.busy(Promise.all([pdf.edit({ bytes: doc.bytes, password: doc.password }, pages.map((p) => ({ ...p, ocr: scanWords.get(p.source) })), usedPictures()), sleep(700)]));
       if (certSign) bytes = await mascot.busy(sealWithCertificate(bytes, certSign));
       const name = `${baseName(doc.file.name)}-${certSign ? "signed" : "edited"}.pdf`;
       const stamp = h("div.stamp", { "aria-hidden": "true" }, "LEKKER!");
@@ -1027,6 +1090,9 @@ export function editTool(): HTMLElement {
   });
 
   function reset() {
+    void ocrEngine?.then((e) => e.stop()).catch(() => undefined);
+    ocrEngine = undefined;
+    scanWords.clear();
     closeActive(false);
     if (doc) closeSession(doc.session);
     doc = undefined;
@@ -1148,4 +1214,42 @@ function measure(text: string, f: Fmt): number {
   if (!measureCtx) return text.length * f.size * 0.6;
   measureCtx.font = `${f.italic ? "italic " : ""}${f.bold ? "700 " : ""}${f.size}px ${familyCss(f.family)}`;
   return measureCtx.measureText(text).width;
+}
+
+/**
+ * For each line on a scanned page, picks the ink colour (darkest pixels) and the
+ * paper colour (lightest pixels) from the rendered page image, as 0–1 RGB.
+ */
+async function sampleColours(png: Uint8Array, boxes: Box[], scale: number): Promise<{ ink: Rgb; paper: Rgb }[]> {
+  const fallback = { ink: [0, 0, 0] as Rgb, paper: [1, 1, 1] as Rgb };
+  if (boxes.length === 0) return [];
+  try {
+    const bitmap = await createImageBitmap(new Blob([png as BlobPart], { type: "image/png" }));
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    return boxes.map((b) => {
+      const x0 = clamp(Math.floor(b[0] * scale), 0, canvas.width - 1);
+      const y0 = clamp(Math.floor(b[1] * scale), 0, canvas.height - 1);
+      const x1 = clamp(Math.ceil(b[2] * scale), x0 + 1, canvas.width);
+      const y1 = clamp(Math.ceil(b[3] * scale), y0 + 1, canvas.height);
+      const data = ctx.getImageData(x0, y0, x1 - x0, y1 - y0).data;
+      const px: { l: number; i: number }[] = [];
+      for (let i = 0; i < data.length; i += 4) px.push({ l: data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11, i });
+      px.sort((a, c) => a.l - c.l);
+      // Average the darkest 8% (ink) and the lightest 30% (paper).
+      const avg = (from: number, to: number): Rgb => {
+        const sum = [0, 0, 0];
+        const part = px.slice(from, Math.max(from + 1, to));
+        for (const { i } of part) for (let k = 0; k < 3; k++) sum[k] += data[i + k];
+        return sum.map((v) => Math.round((v / part.length / 255) * 1000) / 1000) as Rgb;
+      };
+      return { ink: avg(0, Math.ceil(px.length * 0.08)), paper: avg(Math.floor(px.length * 0.7), px.length) };
+    });
+  } catch {
+    return boxes.map(() => fallback);
+  }
 }

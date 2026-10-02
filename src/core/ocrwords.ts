@@ -46,3 +46,37 @@ export function wordsFromBlocks(blocks: TesseractBlock[] | null | undefined, sca
   }
   return words;
 }
+
+/** A line of text read from a scanned page, in page space (points). */
+export interface OcrLine {
+  text: string;
+  bbox: [number, number, number, number];
+  /** Baseline start of the line. */
+  origin: [number, number];
+  /** Estimated font size in points. */
+  size: number;
+  words: OcrWord[];
+}
+
+/** Groups OCR words into lines, with a font size estimated from the letter heights. */
+export function linesFromBlocks(blocks: TesseractBlock[] | null | undefined, scale: number): OcrLine[] {
+  const lines: OcrLine[] = [];
+  for (const block of blocks ?? []) {
+    for (const paragraph of block.paragraphs) {
+      for (const line of paragraph.lines) {
+        const words = wordsFromBlocks([{ paragraphs: [{ lines: [line] }] }], scale);
+        if (words.length === 0) continue;
+        const x0 = Math.min(...words.map((w) => w.bbox[0]));
+        const y0 = Math.min(...words.map((w) => w.bbox[1]));
+        const x1 = Math.max(...words.map((w) => w.bbox[2]));
+        const y1 = Math.max(...words.map((w) => w.bbox[3]));
+        const baseline = words[0].baseline;
+        // Capitals and tall letters rise about 0.72 of the font size above the baseline.
+        const ascent = Math.max(...words.map((w) => w.baseline - w.bbox[1]));
+        const size = Math.max(4, Math.round((ascent / 0.72) * 2) / 2);
+        lines.push({ text: words.map((w) => w.text).join(" "), bbox: [x0, y0, x1, y1], origin: [x0, baseline], size, words });
+      }
+    }
+  }
+  return lines;
+}

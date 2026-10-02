@@ -2393,6 +2393,26 @@ del {
   }
 }
 
+/* A scanned page being read in the editor. */
+.stage.scanning::after {
+  content: "";
+  position: absolute;
+  z-index: 3;
+  left: 0;
+  right: 0;
+  height: 4px;
+  pointer-events: none;
+  background: var(--accent);
+  box-shadow: 0 0 18px 4px var(--accent);
+  animation: scan-beam 1.6s ease-in-out infinite alternate;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage.scanning::after {
+    animation: none;
+    top: 0;
+  }
+}
+
 /* ---------- Toasts + confetti ---------- */
 .toasts {
   position: fixed;
