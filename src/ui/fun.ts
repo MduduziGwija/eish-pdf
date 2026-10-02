@@ -84,11 +84,11 @@ const MASCOT_SVG = `
       <path d="M54 61q4-4 8 0M30 60l-12-4M86 60l12-4"/>
     </g>
     <g class="m-hat">
-      <path class="m-hat-crown" d="M31 13 37-15q20-9 40 0l6 28z"/>
-      <path class="m-hat-band" d="M33.5 2h47l1.4 6.5H32z"/>
-      <path class="m-hat-stripe" d="M34.6-3h45l1 4h-47z"/>
-      <ellipse class="m-hat-brim" cx="57" cy="14" rx="44" ry="9"/>
-      <ellipse class="m-hat-stitch" cx="57" cy="14.5" rx="37" ry="5.5"/>
+      <path class="m-hat-brim" d="M21 14Q60 25 99 14L114 34Q60 54 6 34Z"/>
+      <path class="m-hat-stitch" d="M13 31Q60 48 107 31M17 25Q60 40 103 25"/>
+      <path class="m-hat-crown" d="M23 17C22-9 38-25 60-25S98-9 97 17Q60 27 23 17Z"/>
+      <path class="m-hat-stitch" d="M33 9C33-9 45-19 60-19S87-9 87 9M43 4C43-6 50-13 60-13S77-6 77 4"/>
+      <path class="m-hat-band" d="M24 8Q60 18 96 8L97 17Q60 27 23 17Z"/>
     </g>
   </g>
 </svg>`;
