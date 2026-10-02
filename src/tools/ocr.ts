@@ -40,7 +40,7 @@ export function ocrTool(): HTMLElement {
   const language = h("select.input.select", { "aria-label": "Language of the documents" });
   for (const l of LANGUAGES) language.append(h("option", { value: l.id }, l.label));
   const skip = h("input", { type: "checkbox", checked: true });
-  const runBtn = h("button.btn.primary.big", { type: "button" }, h("span.glyph-icon", { "aria-hidden": "true" }, "🔍"), h("span", {}, "Make searchable"));
+  const runBtn = h("button.btn.primary.big", { type: "button" }, icon("ocr"), h("span", {}, "Make searchable"));
   const zipBtn = h("button.btn", { type: "button", hidden: true }, icon("download"), "Download all (.zip)");
   const clearBtn = h("button.btn.ghost", { type: "button" }, "Clear");
   const summary = h("div.summary");
@@ -101,7 +101,7 @@ export function ocrTool(): HTMLElement {
     item.row.dataset.state = item.state;
     fill(
       item.row,
-      h("div.file-icon.scan", {}, h("span.glyph-icon", { "aria-hidden": "true" }, "🔍")),
+      h("div.file-icon.scan", {}, icon("ocr")),
       h(
         "div.file-main",
         {},

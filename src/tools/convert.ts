@@ -48,7 +48,7 @@ export function convertTool(): HTMLElement {
 
   const list = h("ul.file-list", { "aria-label": "Files to convert" });
   const summary = h("div.summary");
-  const runBtn = h("button.btn.primary.big", { type: "button" }, h("span.glyph-icon", { "aria-hidden": "true" }, "⇄"), h("span", {}, "Convert"));
+  const runBtn = h("button.btn.primary.big", { type: "button" }, icon("convert"), h("span", {}, "Convert"));
   const zipBtn = h("button.btn", { type: "button", hidden: true }, icon("download"), "Download all (.zip)");
   const clearBtn = h("button.btn.ghost", { type: "button" }, "Clear");
   const combine = h("input", { type: "checkbox", checked: true });

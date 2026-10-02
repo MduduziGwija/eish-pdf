@@ -16,10 +16,10 @@ const TOOLS = [
   { id: "unlock", label: "Unlock", icon: icon("lock"), build: unlockTool },
   { id: "merge", label: "Merge", icon: icon("merge"), build: mergeTool },
   { id: "split", label: "Split", icon: icon("scissors"), build: splitTool },
-  { id: "edit", label: "Edit", icon: h("span.glyph-icon", { "aria-hidden": "true" }, "✎"), build: editTool },
-  { id: "convert", label: "Convert", icon: h("span.glyph-icon", { "aria-hidden": "true" }, "⇄"), build: convertTool },
-  { id: "compare", label: "Compare", icon: h("span.glyph-icon", { "aria-hidden": "true" }, "⚖"), build: compareTool },
-  { id: "ocr", label: "OCR", icon: h("span.glyph-icon", { "aria-hidden": "true" }, "🔍"), build: ocrTool },
+  { id: "edit", label: "Edit", icon: icon("pen"), build: editTool },
+  { id: "convert", label: "Convert", icon: icon("convert"), build: convertTool },
+  { id: "compare", label: "Compare", icon: icon("compare"), build: compareTool },
+  { id: "ocr", label: "OCR", icon: icon("ocr"), build: ocrTool },
 ] as const;
 type ToolId = (typeof TOOLS)[number]["id"];
 
@@ -92,8 +92,10 @@ function show(id: ToolId) {
     b.tabIndex = key === id ? 0 : -1;
   }
   const active = tabButtons.get(id)!;
+  // The tabs can wrap onto two rows on phones, so follow both axes.
   indicator.style.width = `${active.offsetWidth}px`;
-  indicator.style.transform = `translateX(${active.offsetLeft}px)`;
+  indicator.style.height = `${active.offsetHeight}px`;
+  indicator.style.transform = `translate(${active.offsetLeft}px, ${active.offsetTop}px)`;
   panel.classList.remove("enter");
   void panel.offsetWidth;
   panel.classList.add("enter");

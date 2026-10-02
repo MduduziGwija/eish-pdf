@@ -53,7 +53,7 @@ export function compareTool(): HTMLElement {
   const list = h("ul.file-list", { "aria-label": "PDFs to compare" });
   const summary = h("div.summary");
   const ignoreCase = h("input", { type: "checkbox" });
-  const runBtn = h("button.btn.primary.big", { type: "button" }, h("span.glyph-icon", { "aria-hidden": "true" }, "⚖"), h("span", {}, "Compare"));
+  const runBtn = h("button.btn.primary.big", { type: "button" }, icon("compare"), h("span", {}, "Compare"));
   const clearBtn = h("button.btn.ghost", { type: "button" }, "Clear");
   const options = h("div.ocr-options", { hidden: true }, h("label.check", {}, ignoreCase, h("span", {}, "Ignore upper/lower case")));
   const toolbar = h("div.toolbar", { hidden: true }, summary, h("div.actions", {}, clearBtn, runBtn));
