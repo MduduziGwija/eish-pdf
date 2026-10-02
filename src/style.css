@@ -1814,6 +1814,41 @@ button.thumb:not(:disabled):hover {
   gap: 8px;
 }
 
+/* ----- Certificate signing ----- */
+.cert-btn.on {
+  border-color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 18%, var(--surface));
+}
+.cert-card {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px;
+  border-radius: 14px;
+  background: var(--good-soft);
+  animation: land 0.45s var(--spring);
+}
+.cert-seal {
+  font-size: 1.8rem;
+  animation: boing 0.6s var(--spring);
+}
+.cert-warn {
+  margin-top: 4px;
+  color: var(--warn);
+  font-size: 0.85rem;
+}
+.cert-summary {
+  display: grid;
+  gap: 10px;
+}
+.option.stack {
+  display: grid;
+  gap: 4px;
+}
+.option .input {
+  font-weight: 400;
+}
+
 /* ----- Editor bar, formatting, zoom ----- */
 .editor-row {
   display: flex;

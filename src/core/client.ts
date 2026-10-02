@@ -5,6 +5,7 @@ import type { OcrWord, TextLine } from "./text";
 import type { ImageOptions } from "./convert";
 import type { Slide } from "./slides";
 import type { Comparison, CompareOptions, DocText } from "./compare";
+import type { PreparedPdf, SignatureInfo } from "./signing";
 
 export class PdfError extends Error {
   constructor(public readonly kind: ErrorKind, message: string) {
@@ -77,5 +78,6 @@ export const pdf = {
   pdfToImages: (input: PdfInput, format: "png" | "jpg", dpi: number) => call<Uint8Array[]>({ op: "pdfToImages", input, format, dpi }),
   pdfToDocx: (input: PdfInput, title: string) => call<Uint8Array>({ op: "pdfToDocx", input, title }),
   pdfLines: (input: PdfInput) => call<string[][]>({ op: "pdfLines", input }),
+  prepareSign: (bytes: Uint8Array, info: SignatureInfo) => call<PreparedPdf>({ op: "prepareSign", bytes, info }),
   compare: (base: DocText, others: DocText[], options: CompareOptions) => call<Comparison[]>({ op: "compare", base, others, options }),
 };

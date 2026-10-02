@@ -9,6 +9,7 @@ import { closeSession, lazyThumb, renderUrl } from "../ui/thumbs";
 import { browserImageToPng, ENGINE_IMAGES } from "../convert/images";
 import { DEFAULT_FMT, familyCss, formatBar, rgbCss, styleElement, SWATCHES, type Fmt } from "./format";
 import { openSignatureDialog, type Picture } from "./signature";
+import { openCertificateDialog, type CertSettings } from "../sign/dialog";
 
 type Tool = "retext" | "text" | "draw" | "image" | "sign" | "highlight" | "erase" | "select";
 type Point = [number, number];
@@ -69,6 +70,25 @@ export function editTool(): HTMLElement {
   const result = h("div.result-slot");
   const undoBtn = h("button.btn.ghost", { type: "button", title: "Undo (Ctrl+Z)" }, "↶ Undo");
   const saveBtn = h("button.btn.primary.big", { type: "button" }, icon("download"), h("span", {}, "Save PDF"));
+  // Optional certificate signature applied when saving.
+  let certSign: CertSettings | undefined;
+  const certBtn = h("button.btn.cert-btn", { type: "button", title: "Optional: seal the PDF with a certificate (digital signature)" });
+  const paintCertBtn = () => {
+    certBtn.classList.toggle("on", !!certSign);
+    certBtn.replaceChildren(h("span", { "aria-hidden": "true" }, "🔏"), h("span", {}, certSign ? `Signing as ${certSign.identity.name}` : "Digital signature"));
+  };
+  paintCertBtn();
+  certBtn.addEventListener("click", async () => {
+    closeActive();
+    const hasPicture = pages.some((p) => p.annotations.some((a) => a.type === "image" && a.signature));
+    const choice = await openCertificateDialog(certSign, hasPicture);
+    if (choice === "off") certSign = undefined;
+    else if (choice) {
+      certSign = choice;
+      mascot.flash("happy", `Sho! Saving will seal it as ${choice.identity.name}.`, 2400);
+    }
+    paintCertBtn();
+  });
 
   const zone = dropzone({ multiple: false, title: "Drop a PDF to edit", onFiles: ([f]) => void load(f) });
 
@@ -316,7 +336,7 @@ export function editTool(): HTMLElement {
     );
     const fullscreen = enlarged && view.kind === "page";
     // In full screen, Undo and Save move into the editor's own bar.
-    const bar = h("div.toolbar", {}, h("span.chip", {}, edits() ? `${plural(edits(), "change")} so far` : "No changes yet"), !fullscreen && h("div.actions", {}, undoBtn, saveBtn));
+    const bar = h("div.toolbar", {}, h("span.chip", {}, edits() ? `${plural(edits(), "change")} so far` : "No changes yet"), !fullscreen && h("div.actions", {}, undoBtn, certBtn, saveBtn));
     workspace.replaceChildren(header, tabs, bar, view.kind === "grid" ? gridView() : pageView(view.index));
     document.body.classList.toggle("editor-enlarged", enlarged && view.kind === "page");
   }
@@ -573,7 +593,7 @@ export function editTool(): HTMLElement {
     const editor = h(
       `div.page-editor${enlarged ? ".enlarged" : ""}`,
       {},
-      h("div.editor-bar", {}, h("div.editor-row", {}, palette, zoomBox, enlarged && h("div.actions", {}, undoBtn, saveBtn)), options),
+      h("div.editor-bar", {}, h("div.editor-row", {}, palette, zoomBox, enlarged && h("div.actions", {}, undoBtn, certBtn, saveBtn)), options),
       wrap,
       nav,
     );
@@ -896,7 +916,7 @@ export function editTool(): HTMLElement {
   }
 
   /** Puts a picture in the middle of the page being edited, selected and ready to move. */
-  function placePicture(pic: Picture, maxWidthShare: number, label: string) {
+  function placePicture(pic: Picture, maxWidthShare: number, label: string, signature = false) {
     if (view.kind !== "page") return;
     const p = pages[view.index];
     const { width: W, height: H } = shown(p);
@@ -913,7 +933,7 @@ export function editTool(): HTMLElement {
     const y0 = (H - hgt) / 2;
     tool = "select";
     commit(() => {
-      p.annotations.push({ type: "image", rect: [x0, y0, x0 + w, y0 + hgt], image: id });
+      p.annotations.push({ type: "image", rect: [x0, y0, x0 + w, y0 + hgt], image: id, ...(signature ? { signature: true } : {}) });
       selected = p.annotations.length - 1;
     });
     mascot.flash("happy", label, 2200);
@@ -941,18 +961,45 @@ export function editTool(): HTMLElement {
 
   async function signNow() {
     const sig = await openSignatureDialog();
-    if (sig) placePicture(sig, 0.32, "Signed, sealed, delivered. Sho!");
+    if (sig) placePicture(sig, 0.32, "Signed, sealed, delivered. Sho!", true);
   }
 
   // --- Saving --------------------------------------------------------------
+
+  /** Applies the certificate signature, shown over the last placed signature picture if wanted. */
+  async function sealWithCertificate(bytes: Uint8Array, cert: CertSettings): Promise<Uint8Array> {
+    let page: number | undefined;
+    let rect: Box | undefined;
+    if (cert.visible) {
+      pages.forEach((p, i) =>
+        p.annotations.forEach((a) => {
+          if (a.type === "image" && a.signature) {
+            page = i;
+            rect = a.rect;
+          }
+        }),
+      );
+    }
+    const prepared = await pdf.prepareSign(bytes, {
+      name: cert.identity.name,
+      reason: cert.reason || undefined,
+      location: cert.location || undefined,
+      contact: cert.identity.email,
+      page,
+      rect,
+    });
+    const { signPrepared } = await import("../sign/certificate");
+    return signPrepared(prepared, cert.identity);
+  }
 
   saveBtn.addEventListener("click", async () => {
     if (!doc) return;
     closeActive();
     saveBtn.disabled = true;
     try {
-      const [bytes] = await mascot.busy(Promise.all([pdf.edit({ bytes: doc.bytes, password: doc.password }, pages, usedPictures()), sleep(700)]));
-      const name = `${baseName(doc.file.name)}-edited.pdf`;
+      let [bytes] = await mascot.busy(Promise.all([pdf.edit({ bytes: doc.bytes, password: doc.password }, pages, usedPictures()), sleep(700)]));
+      if (certSign) bytes = await mascot.busy(sealWithCertificate(bytes, certSign));
+      const name = `${baseName(doc.file.name)}-${certSign ? "signed" : "edited"}.pdf`;
       const stamp = h("div.stamp", { "aria-hidden": "true" }, "LEKKER!");
       workspace.append(stamp);
       setTimeout(() => stamp.remove(), 1600);
@@ -971,7 +1018,7 @@ export function editTool(): HTMLElement {
         render();
       }
       reveal(result);
-      celebrate("Saved! Sho mfowethu, lekker edits.", result);
+      celebrate(certSign ? `Signed and sealed 🔏 by ${certSign.identity.name}. Sho!` : "Saved! Sho mfowethu, lekker edits.", result);
     } catch (err) {
       oops(err instanceof PdfError ? err.message : "Saving failed.");
     } finally {

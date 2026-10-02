@@ -3,6 +3,7 @@ import type { OcrWord } from "./text";
 import type { ImageOptions } from "./convert";
 import type { Slide } from "./slides";
 import type { CompareOptions, DocText } from "./compare";
+import type { SignatureInfo } from "./signing";
 
 export type Request =
   | { id: number; op: "inspect"; input: PdfInput }
@@ -27,6 +28,7 @@ export type Request =
   | { id: number; op: "pdfToImages"; input: PdfInput; format: "png" | "jpg"; dpi: number }
   | { id: number; op: "pdfToDocx"; input: PdfInput; title: string }
   | { id: number; op: "pdfLines"; input: PdfInput }
+  | { id: number; op: "prepareSign"; bytes: Uint8Array; info: SignatureInfo }
   | { id: number; op: "compare"; base: DocText; others: DocText[]; options: CompareOptions };
 
 export type ErrorKind = "password" | "not-pdf" | "error";

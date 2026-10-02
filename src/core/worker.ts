@@ -7,6 +7,7 @@ import { addOcrLayer, pageHasText, textLines } from "./text";
 import { slidesToPdf } from "./slides";
 import { documentToPdf, htmlToPdf, imagesToPdf, pdfLines, pdfToDocx, pdfToHtml, pdfToImages, pdfToText } from "./convert";
 import { compareDocs } from "./compare";
+import { prepareForSigning } from "./signing";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -80,6 +81,10 @@ function handle(req: Request): { result: unknown; transfer?: Transferable[] } {
     }
     case "pdfToDocx":
       return bytesResult(pdfToDocx(req.input, req.title));
+    case "prepareSign": {
+      const prepared = prepareForSigning(req.bytes, req.info);
+      return { result: prepared, transfer: [prepared.bytes.buffer] };
+    }
     case "pdfLines":
       return { result: pdfLines(req.input) };
     case "compare":

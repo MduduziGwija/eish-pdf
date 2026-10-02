@@ -185,7 +185,7 @@ export type Annotation =
   | { type: "highlight"; rect: Box; color: Rgb }
   | { type: "erase"; rect: Box }
   /** A picture (or signature) stretched to `rect`; `image` keys into the images passed to edit(). */
-  | { type: "image"; rect: Box; image: string }
+  | { type: "image"; rect: Box; image: string; signature?: boolean }
   /** Swaps an existing line of text for new text in the same style and place. */
   | { type: "replace"; rect: Box; text: string; origin: [number, number]; size: number; color: Rgb; font: FontStyle; underline?: boolean; strike?: boolean };
 
