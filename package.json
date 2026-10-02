@@ -1,0 +1,33 @@
+{
+  "name": "eish-pdf",
+  "version": "0.1.0",
+  "description": "Eish PDF \u2013 free PDF tools that run entirely in your browser.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "AGPL-3.0-or-later",
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "mupdf": "^1.28.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3"
+  },
+  "private": true,
+  "type": "module",
+  "author": "Mduduzi Gwija <mduduzigwija@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MduduziGwija/eish-pdf.git"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

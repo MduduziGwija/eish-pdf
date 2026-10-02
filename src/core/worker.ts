@@ -1,0 +1,63 @@
+/// <reference lib="webworker" />
+// Runs MuPDF off the main thread so animations stay smooth while PDFs are processed.
+import type * as mupdf from "mupdf";
+import { edit, inspect, merge, NotPdfError, openPdf, pageSizes, PasswordError, renderPage, split, unlock } from "./pdf";
+import type { Request, Response } from "./protocol";
+
+declare const self: DedicatedWorkerGlobalScope;
+
+const sessions = new Map<number, mupdf.PDFDocument>();
+let nextSession = 1;
+
+function handle(req: Request): { result: unknown; transfer?: Transferable[] } {
+  switch (req.op) {
+    case "inspect":
+      return { result: inspect(req.input) };
+    case "unlock": {
+      const bytes = unlock(req.input);
+      return { result: bytes, transfer: [bytes.buffer] };
+    }
+    case "merge": {
+      const bytes = merge(req.inputs);
+      return { result: bytes, transfer: [bytes.buffer] };
+    }
+    case "split": {
+      const files = split(req.input, req.groups);
+      return { result: files, transfer: files.map((f) => f.buffer) };
+    }
+    case "edit": {
+      const bytes = edit(req.input, req.pages);
+      return { result: bytes, transfer: [bytes.buffer] };
+    }
+    case "open": {
+      const doc = openPdf(req.input);
+      const session = nextSession++;
+      sessions.set(session, doc);
+      return { result: { session, pages: pageSizes(doc) } };
+    }
+    case "render": {
+      const doc = sessions.get(req.session);
+      if (!doc) throw new Error("That document is no longer open.");
+      const png = renderPage(doc, req.page, req.scale, req.rotate);
+      return { result: png, transfer: [png.buffer] };
+    }
+    case "close":
+      sessions.get(req.session)?.destroy();
+      sessions.delete(req.session);
+      return { result: null };
+  }
+}
+
+self.onmessage = (event: MessageEvent<Request>) => {
+  const req = event.data;
+  try {
+    const { result, transfer = [] } = handle(req);
+    self.postMessage({ id: req.id, ok: true, result } satisfies Response, transfer);
+  } catch (err) {
+    const kind = err instanceof PasswordError ? "password" : err instanceof NotPdfError ? "not-pdf" : "error";
+    const message = err instanceof Error ? err.message : String(err);
+    self.postMessage({ id: req.id, ok: false, kind, message } satisfies Response);
+  }
+};
+
+self.postMessage({ ready: true });
