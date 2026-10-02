@@ -39,6 +39,7 @@ export function wordsFromBlocks(blocks: TesseractBlock[] | null | undefined, sca
             text,
             bbox: [w.bbox.x0 / scale, w.bbox.y0 / scale, w.bbox.x1 / scale, w.bbox.y1 / scale],
             baseline: baseline / scale,
+            confidence: w.confidence,
           });
         }
       }
@@ -94,5 +95,44 @@ export function linesFromBlocks(blocks: TesseractBlock[] | null | undefined, sca
       }
     }
   }
-  return lines;
+  return joinSplitLines(lines);
+}
+
+/**
+ * OCR sometimes splits one line into pieces (handwriting especially, or a gap
+ * after a label). Pieces on the same baseline, close together and of a similar
+ * size, are joined back into one line, so editing it replaces all of it.
+ */
+export function joinSplitLines(lines: OcrLine[]): OcrLine[] {
+  const out = [...lines].sort((a, b) => a.bbox[0] - b.bbox[0]);
+  let joined = true;
+  while (joined) {
+    joined = false;
+    for (let i = 0; i < out.length && !joined; i++) {
+      for (let j = 0; j < out.length && !joined; j++) {
+        if (i === j) continue;
+        const [a, b] = [out[i], out[j]];
+        const overlap = Math.min(a.bbox[3], b.bbox[3]) - Math.max(a.bbox[1], b.bbox[1]);
+        const height = Math.min(a.bbox[3] - a.bbox[1], b.bbox[3] - b.bbox[1]);
+        const size = Math.max(a.size, b.size);
+        const gap = b.bbox[0] - a.bbox[2];
+        const similar = Math.min(a.size, b.size) / size >= 0.65;
+        if (overlap >= height * 0.5 && similar && gap > -size && gap <= size * 2.5 && Math.abs(a.origin[1] - b.origin[1]) <= size * 0.35) {
+          const words = [...a.words, ...b.words].sort((p, q) => p.bbox[0] - q.bbox[0]);
+          const main = a.words.length >= b.words.length ? a : b;
+          out[i] = {
+            text: words.map((w) => w.text).join(" "),
+            bbox: [Math.min(a.bbox[0], b.bbox[0]), Math.min(a.bbox[1], b.bbox[1]), Math.max(a.bbox[2], b.bbox[2]), Math.max(a.bbox[3], b.bbox[3])],
+            origin: [Math.min(a.origin[0], b.origin[0]), main.origin[1]],
+            size: main.size,
+            words,
+            letters: [...a.letters, ...b.letters],
+          };
+          out.splice(j, 1);
+          joined = true;
+        }
+      }
+    }
+  }
+  return out.sort((a, b) => a.bbox[1] - b.bbox[1] || a.bbox[0] - b.bbox[0]);
 }

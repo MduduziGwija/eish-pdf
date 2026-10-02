@@ -75,6 +75,8 @@ export function editTool(): HTMLElement {
   let scanLanguage: OcrLanguage = "eng";
   // Scanned lines are redrawn in the scan's own look (font, blur, grain), unless turned off.
   let matchScan = true;
+  /** "auto", or the CSS name of a font picked for redrawing scanned lines. */
+  let scanFont = "auto";
   const scanRenders = new Map<number, { png: Uint8Array; scale: number }>();
   const scanPictures = new Map<number, Promise<ScanPicture>>();
   try {
@@ -248,11 +250,25 @@ export function editTool(): HTMLElement {
       }
       mascot.flash("happy", matchScan ? "Sho! New words will look scanned too." : "Okay, crisp clean text it is.", 2200);
     });
+    // Font choice: the best match, or any of the bundled fonts (listed once they're loaded).
+    const fontSelect = h("select.input.select.small", { "aria-label": "Font for scanned text" }, h("option", { value: "auto" }, "Best match (auto)"));
+    void import("../scan/fonts").then(({ FAMILIES, GENERIC_LABELS }) => {
+      for (const generic of ["serif", "sans", "mono", "hand"] as const) {
+        const group = h("optgroup", { label: GENERIC_LABELS[generic] });
+        for (const f of FAMILIES.filter((x) => x.generic === generic)) group.append(h("option", { value: f.css, selected: f.css === scanFont }, f.label));
+        fontSelect.append(group);
+      }
+    });
+    fontSelect.addEventListener("change", () => {
+      scanFont = fontSelect.value;
+      mascot.flash("happy", scanFont === "auto" ? "Sho, I'll pick the closest font myself." : "Got it. Click a line to redraw it in that font.", 2400);
+    });
     return h(
       "div.scan-tools.scan-language",
       { hidden: !scannedSources.has(source) },
       h("label.option", {}, h("span", {}, "Scan language"), select),
-      h("label.check", { title: "Redraws your words in the scan's own font, size, blur, grain and ink, reusing the scan's own letters where it can" }, match, h("span", {}, "Match the scan's look")),
+      h("label.check", { title: "Redraws your words in the scan's own font or handwriting, size, slant, blur, grain and ink, reusing the scan's own letters and words where it can" }, match, h("span", {}, "Match the scan's look")),
+      h("label.option", {}, h("span", {}, "Font"), fontSelect),
     );
   }
 
@@ -1100,6 +1116,7 @@ export function editTool(): HTMLElement {
         sizeScale: f.size / detected.size,
         color: f.color.every((v, i) => Math.abs(v - detected.color[i]) < 0.01) ? undefined : f.color,
         style: faceChanged ? { generic: f.family, bold: f.bold, italic: f.italic } : undefined,
+        family: scanFont !== "auto" ? scanFont : undefined,
         underline: f.underline,
         strike: f.strike,
       });
@@ -1115,8 +1132,12 @@ export function editTool(): HTMLElement {
           words: painted.words,
         },
       });
-      const reused = [...plain.text].filter((c) => look.glyphs.has(c)).length;
-      mascot.flash("happy", `Sho! Matched the scan: ${look.face.family.label} look${reused && !faceChanged ? `, ${plural(reused, "letter")} straight from the scan` : ""}.`, 3200);
+      const tokens = plain.text.split(/\s+/).filter(Boolean);
+      const wholeWords = tokens.filter((t) => look.words.has(t)).length;
+      const ownLetters = tokens.filter((t) => !look.words.has(t)).join("").split("").filter((c) => look.letters.has(c)).length;
+      const from = [wholeWords && plural(wholeWords, "word"), ownLetters && plural(ownLetters, "letter")].filter(Boolean).join(" and ");
+      const font = scanFont !== "auto" ? "your chosen font" : `${look.face.family.label} look`;
+      mascot.flash("happy", `Sho! Matched the ${look.hand ? "handwriting" : "scan"}: ${font}${from && !faceChanged && scanFont === "auto" ? `, ${from} straight from the scan` : ""}.`, 3400);
     } catch {
       if (!pages.includes(p)) return;
       place(plain);
@@ -1255,6 +1276,7 @@ export function editTool(): HTMLElement {
     scannedSources.clear();
     scanRenders.clear();
     scanPictures.clear();
+    scanFont = "auto";
     closeActive(false);
     if (doc) closeSession(doc.session);
     doc = undefined;

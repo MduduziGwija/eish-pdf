@@ -1,6 +1,6 @@
 import { createWorker } from "tesseract.js";
 import { describe, expect, it } from "vitest";
-import { wordsFromBlocks, type TesseractBlock } from "../src/core/ocrwords";
+import { joinSplitLines, wordsFromBlocks, type OcrLine, type TesseractBlock } from "../src/core/ocrwords";
 import { openPdf, renderPage } from "../src/core/pdf";
 import { addOcrLayer, pageHasText } from "../src/core/text";
 import { makeEmbeddedPdf, makeScannedPdf, pageTexts } from "./fixtures";
@@ -29,7 +29,7 @@ describe("wordsFromBlocks", () => {
         ],
       },
     ];
-    expect(wordsFromBlocks(blocks, 2)).toEqual([
+    expect(wordsFromBlocks(blocks, 2)).toMatchObject([
       { text: "Hello", bbox: [50, 100, 125, 130], baseline: 125 },
       { text: "world", bbox: [150, 100, 250, 130], baseline: 126 },
     ]);
@@ -64,5 +64,29 @@ describe("OCR end to end", () => {
     } finally {
       doc.destroy();
     }
+  });
+});
+
+describe("joining split OCR lines", () => {
+  const piece = (text: string, x0: number, x1: number, baseline: number, size = 12): OcrLine => ({
+    text,
+    bbox: [x0, baseline - size * 0.75, x1, baseline + size * 0.2],
+    origin: [x0, baseline],
+    size,
+    words: [{ text, bbox: [x0, baseline - size * 0.75, x1, baseline + size * 0.2], baseline }],
+    letters: [],
+  });
+
+  it("joins pieces of one line, and leaves separate lines and columns alone", () => {
+    const lines = joinSplitLines([
+      piece("by Sipho", 120, 170, 100),
+      piece("Received", 70, 115, 100.5),
+      piece("Next line", 70, 130, 120),
+      piece("Far column", 400, 460, 100),
+    ]);
+    expect(lines.map((l) => l.text)).toEqual(["Received by Sipho", "Far column", "Next line"]);
+    expect(lines[0].bbox[0]).toBe(70);
+    expect(lines[0].bbox[2]).toBe(170);
+    expect(lines[0].origin[0]).toBe(70);
   });
 });

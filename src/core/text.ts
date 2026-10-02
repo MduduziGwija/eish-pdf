@@ -357,6 +357,8 @@ export interface OcrWord {
   bbox: Box;
   /** Baseline y in page space. */
   baseline: number;
+  /** How sure OCR was (0–100), when known. */
+  confidence?: number;
 }
 
 /** Adds OCR'd words as invisible, searchable text sized to cover each word. */

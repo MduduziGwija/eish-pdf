@@ -1,19 +1,23 @@
-// Redraws a line of a scanned page so the new words look scanned too.
+// Redraws a line of a scanned page so the new words look scanned (or
+// handwritten) too.
 //
 // 1. Measures the scan: paper and ink colour, paper grain, and whether it's a
 //    pure black-and-white scan.
-// 2. Finds the closest font: every candidate font draws the line's own words,
-//    which are compared with the scan, also fitting size, width and slant.
-// 3. Fits the look: stroke weight, blur and ink strength, by comparing the
-//    redrawn words with the scanned ones pixel by pixel.
-// 4. Collects the scan's own letters (when Tesseract was sure of them and they
-//    stand apart), so new words reuse the real letters where it can.
+// 2. Finds the closest font. A few "scout" fonts (serif, sans, typewriter and
+//    three kinds of handwriting) show which kinds are worth a closer look; then
+//    every font of those kinds draws the line's own words, which are compared
+//    with the scan.
+// 3. Fits size, width, slant, stroke weight, blur and ink strength, by drawing
+//    the words each way and comparing them with the scan pixel by pixel.
+// 4. Collects the scan's own letters and whole words (when OCR was sure of them
+//    and they can be cut out cleanly), so new text reuses the real thing.
 // 5. Paints: the old words are covered with paper borrowed from around them,
-//    and the new words are drawn with the fitted font, blur and grain.
+//    and the new words are drawn in the fitted look. Handwriting gets a little
+//    natural wobble, so no two letters come out identical.
 import type { OcrLetter } from "../core/ocrwords";
 import type { PixelMatrix } from "../core/scanimage";
 import type { OcrWord, Rgb } from "../core/text";
-import { cssFont, FAMILIES, familyFor, loadFace, type Face, type Generic } from "./fonts";
+import { cssFont, facesOf, FAMILIES, familyByCss, familyFor, loadFace, SCOUTS, type Face, type Generic } from "./fonts";
 import { blur, components, crop, dilate, fillPaper, gaussian, hash, inkBox, ncc, plane, random, resize, type Plane } from "./pixels";
 
 type Box = [number, number, number, number];
@@ -28,12 +32,14 @@ export interface ScanLine {
   letters: OcrLetter[];
 }
 
-interface Glyph {
+/** A letter or word cut out of the scan. */
+interface Cutout {
   alpha: Plane;
   /** Top of `alpha` relative to the baseline, in pixels (negative = above). */
   top: number;
-  /** Horizontal centre of the ink within `alpha`. */
-  centre: number;
+  /** Ink's left edge and width within `alpha`. */
+  left: number;
+  width: number;
   score: number;
 }
 
@@ -44,7 +50,9 @@ export interface LineLook {
   px: number;
   /** Horizontal scale of the letters. */
   stretch: number;
-  /** Extra stroke width, in scan pixels (heavier print). */
+  /** Slant (positive leans right). */
+  shear: number;
+  /** Extra stroke width, in scan pixels (heavier print or a thicker pen). */
   weight: number;
   /** Blur, in scan pixels. */
   sigma: number;
@@ -54,10 +62,14 @@ export interface LineLook {
   noise: number;
   /** Pure black-and-white scan (no greys). */
   bilevel: boolean;
+  /** Handwritten (gets natural wobble). */
+  hand: boolean;
   ink: Rgb;
   paper: Rgb;
   paperSd: number;
-  glyphs: Map<string, Glyph>;
+  /** The scan's own letters (a few of each, so repeats differ) and whole words. */
+  letters: Map<string, Cutout[]>;
+  words: Map<string, Cutout>;
   /** How well the font matches, 0–1. */
   match: number;
 }
@@ -67,11 +79,13 @@ export interface PaintOptions {
   sizeScale: number;
   /** Ink colour (0–1), if changed. */
   color?: Rgb;
-  /** A different style, if the family, bold or italic was changed. */
+  /** A different style, if the family, bold or italic was changed in the format bar. */
   style?: { generic: Generic; bold: boolean; italic: boolean };
+  /** A specific font (its CSS name), instead of the matched one. */
+  family?: string;
   underline?: boolean;
   strike?: boolean;
-  /** Reuse the scan's own letters (default true). */
+  /** Reuse the scan's own letters and words (default true). */
   letters?: boolean;
 }
 
@@ -88,10 +102,19 @@ export interface Painted {
   words: OcrWord[];
 }
 
+/** How text is drawn: font, size and shape adjustments. */
+interface Pen {
+  face: Face;
+  px: number;
+  stretch: number;
+  shear: number;
+  stroke: number;
+}
+
 /** Font size words are drawn at when comparing shapes. */
 const PROBE = 64;
 const SIGMAS = [0, 0.45, 0.75, 1.05, 1.45, 1.95, 2.6];
-const WEIGHTS = [0, 0.025, 0.05, 0.085];
+const SHEARS = [-0.24, -0.18, -0.12, -0.06, 0, 0.06, 0.12, 0.18, 0.24, 0.3];
 
 let canvas: HTMLCanvasElement | undefined;
 let context: CanvasRenderingContext2D;
@@ -121,18 +144,26 @@ function measure(face: Face, px: number, text: string): TextMetrics {
   return context.measureText(text);
 }
 
-/** Draws text and crops it to its ink. */
-function inkOf(face: Face, px: number, stretch: number, stroke: number, text: string, sigma = 0): Plane | null {
-  const width = measure(face, px, text).width * stretch + px * 1.5 + stroke * 2 + sigma * 6;
-  const drawn = drawPlane(width, px * 2.2 + sigma * 6, (ctx) => {
-    ctx.font = cssFont(face, px);
-    ctx.setTransform(stretch, 0, 0, 1, px * 0.6 + sigma * 3, px * 1.5 + sigma * 3);
-    ctx.fillText(text, 0, 0);
-    if (stroke > 0) {
-      ctx.lineWidth = stroke;
-      ctx.strokeText(text, 0, 0);
-    }
-  });
+/** Draws text with its baseline origin at (x, y). */
+function drawText(ctx: CanvasRenderingContext2D, pen: Pen, text: string, x: number, y: number, rotate = 0, scale = 1) {
+  ctx.font = cssFont(pen.face, pen.px);
+  ctx.setTransform(1, 0, 0, 1, x, y);
+  if (rotate) ctx.rotate(rotate);
+  ctx.transform(pen.stretch * scale, 0, -pen.shear * scale, scale, 0, 0);
+  ctx.fillText(text, 0, 0);
+  if (pen.stroke > 0) {
+    ctx.lineWidth = pen.stroke;
+    ctx.strokeText(text, 0, 0);
+  }
+}
+
+/** Room around drawn text, so slant, stroke and blur aren't cut off. */
+const margin = (pen: Pen, sigma = 0) => pen.px * (0.6 + Math.abs(pen.shear) * 1.2) + pen.stroke + sigma * 3;
+
+/** Draws text (optionally blurred) and crops it to its ink. */
+function inkOf(pen: Pen, text: string, sigma = 0): Plane | null {
+  const m = margin(pen, sigma);
+  const drawn = drawPlane(measure(pen.face, pen.px, text).width * pen.stretch + m * 2, pen.px * 2.2 + sigma * 6, (ctx) => drawText(ctx, pen, text, m, pen.px * 1.5 + sigma * 3));
   const p = blur(drawn, sigma);
   const box = inkBox(p, 0.35);
   return box && crop(p, box[0], box[1], box[2] - box[0], box[3] - box[1]);
@@ -157,44 +188,49 @@ function centroid(p: Plane): [number, number] {
 const offsets = new Map<string, [number, number]>();
 
 /** Draws a word blurred, with its centre of ink at `centre`, on a w×h plane. */
-function placeWord(face: Face, px: number, stretch: number, stroke: number, sigma: number, text: string, w: number, h: number, centre: [number, number]): Plane {
+function placeWord(pen: Pen, sigma: number, text: string, w: number, h: number, centre: [number, number]): Plane {
   // Where the ink's centre sits relative to the text's origin (cached).
-  const key = `${cssFont(face, px)}|${stretch}|${stroke}|${text}`;
+  const key = `${cssFont(pen.face, pen.px)}|${pen.stretch}|${pen.shear}|${pen.stroke}|${text}`;
   let offset = offsets.get(key);
   if (!offset) {
-    const ox = px * 0.6 + stroke;
-    const oy = px * 1.5;
-    const probe = drawPlane(measure(face, px, text).width * stretch + px * 1.5 + stroke * 2, px * 2.2, (ctx) => {
-      ctx.font = cssFont(face, px);
-      ctx.setTransform(stretch, 0, 0, 1, ox, oy);
-      ctx.fillText(text, 0, 0);
-      if (stroke > 0) {
-        ctx.lineWidth = stroke;
-        ctx.strokeText(text, 0, 0);
-      }
-    });
+    const m = margin(pen);
+    const oy = pen.px * 1.5;
+    const probe = drawPlane(measure(pen.face, pen.px, text).width * pen.stretch + m * 2, pen.px * 2.2, (ctx) => drawText(ctx, pen, text, m, oy));
     const [cx, cy] = centroid(probe);
-    offset = [cx - ox, cy - oy];
-    if (offsets.size > 2000) offsets.clear();
+    offset = [cx - m, cy - oy];
+    if (offsets.size > 4000) offsets.clear();
     offsets.set(key, offset);
   }
   const [dx, dy] = offset;
-  const drawn = drawPlane(w, h, (ctx) => {
-    ctx.font = cssFont(face, px);
-    ctx.setTransform(stretch, 0, 0, 1, centre[0] - dx, centre[1] - dy);
-    ctx.fillText(text, 0, 0);
-    if (stroke > 0) {
-      ctx.lineWidth = stroke;
-      ctx.strokeText(text, 0, 0);
+  return blur(
+    drawPlane(w, h, (ctx) => drawText(ctx, pen, text, centre[0] - dx, centre[1] - dy)),
+    sigma,
+  );
+}
+
+const threshold = (p: Plane) => plane(p.w, p.h, p.data.map((v) => (v >= 0.5 ? 1 : 0)));
+
+/** Typical stroke thickness of black-and-white ink: twice its area over its outline. */
+function strokeWidth(p: Plane): number {
+  let area = 0;
+  let edge = 0;
+  for (let y = 0; y < p.h; y++) {
+    for (let x = 0; x < p.w; x++) {
+      if (!p.data[y * p.w + x]) continue;
+      area++;
+      const at = (i: number, j: number) => (i < 0 || j < 0 || i >= p.w || j >= p.h ? 0 : p.data[j * p.w + i]);
+      if (!at(x - 1, y) || !at(x + 1, y) || !at(x, y - 1) || !at(x, y + 1)) edge++;
     }
-  });
-  return blur(drawn, sigma);
+  }
+  return edge ? (2 * area) / edge : NaN;
 }
 
 const median = (xs: number[]) => {
   const s = [...xs].sort((a, b) => a - b);
   return s.length ? s[Math.floor(s.length / 2)] : NaN;
 };
+
+const lumOf = (c: Rgb) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
 
 /** The scan's pixels, and where they sit on the page. */
 export class ScanPicture {
@@ -267,7 +303,7 @@ export class ScanPicture {
     return plane(w, h, out);
   }
 
-  /** Works out (once per line) how the line looks. `others`: nearby lines whose letters may be reused. */
+  /** Works out (once per line) how the line looks. `others`: nearby lines whose letters and words may be reused. */
   look(line: ScanLine, others: ScanLine[] = []): Promise<LineLook> {
     const key = line.bbox.join(",");
     let found = this.cache.get(key);
@@ -295,9 +331,8 @@ export class ScanPicture {
     const n = order.length;
     const ink = avg(0, Math.ceil(n * 0.06));
     const paper = avg(Math.floor(n * 0.6), n);
-    const lum = (c: Rgb) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
-    const paperLum = lum(paper);
-    const inkLum = lum(ink);
+    const paperLum = lumOf(paper);
+    const inkLum = lumOf(ink);
     const light = order.slice(Math.floor(n * 0.6)).map((i) => lums[i]);
     const paperMean = light.reduce((a, b) => a + b, 0) / light.length;
     const paperSd = Math.sqrt(light.reduce((a, b) => a + (b - paperMean) ** 2, 0) / light.length);
@@ -310,14 +345,15 @@ export class ScanPicture {
     }
     const bilevel = inked > 0 && grey / inked < 0.06 && paperSd < 4;
 
-    // 2. The closest font, from the line's words.
-    const targets = line.words
+    // 2. The closest font, from the line's words (the ones OCR was surest of).
+    const sure = line.words.filter((w) => (w.confidence ?? 100) >= 60);
+    const targets = (sure.length >= 2 ? sure : line.words)
       .map((w) => {
         const b = this.boxPx(w.bbox, 2);
         const local = crop(cover, b[0] - region[0], b[1] - region[1], b[2] - b[0], b[3] - b[1]);
-        const ink = inkBox(local, 0.35);
-        if (!ink || ink[3] - ink[1] < 6 || w.text.length < 2) return null;
-        return { text: w.text, target: crop(local, ink[0], ink[1], ink[2] - ink[0], ink[3] - ink[1]), local, ink };
+        const box = inkBox(local, 0.35);
+        if (!box || box[3] - box[1] < 6 || w.text.length < 2) return null;
+        return { text: w.text, target: crop(local, box[0], box[1], box[2] - box[0], box[3] - box[1]), local, ink: box };
       })
       .filter((t): t is NonNullable<typeof t> => !!t)
       .sort((a, b) => b.target.w - a.target.w)
@@ -330,12 +366,11 @@ export class ScanPicture {
       const sizes: number[] = [];
       const stretches: number[] = [];
       for (const t of targets) {
-        const r = inkOf(face, PROBE, 1, 0, t.text);
+        const r = inkOf({ face, px: PROBE, stretch: 1, shear: 0, stroke: 0 }, t.text);
         if (!r) continue;
         const sy = t.target.h / r.h;
         const sx = t.target.w / r.w;
-        const fitted = resize(r, t.target.w, t.target.h);
-        total += ncc(blur(fitted, 0.8).data, blur(t.target, 0.8).data) * t.target.w;
+        total += ncc(blur(resize(r, t.target.w, t.target.h), 0.8).data, blur(t.target, 0.8).data) * t.target.w;
         weights += t.target.w;
         sizes.push(sy * PROBE);
         stretches.push(sx / sy);
@@ -348,147 +383,193 @@ export class ScanPicture {
 
     let candidates: ReturnType<typeof score>[];
     if (targets.length) {
-      const regular = FAMILIES.map((family) => ({ family, bold: false, italic: false }));
+      // Scouts first: which kinds of writing (serif, sans, typewriter, handwriting) look closest?
+      const scouts = SCOUTS.map((family) => ({ family, bold: false, italic: false }));
+      await Promise.all(scouts.map(loadFace));
+      const scouted = scouts.map(score);
+      const top = Math.max(...scouted.map((s) => s.score));
+      const kinds = new Set(scouted.filter((s) => s.score >= top - 0.08).map((s) => s.face.family.generic));
+      // Then every font of those kinds, then the styles (bold, italic) of the best two.
+      const regular = FAMILIES.filter((f) => kinds.has(f.generic)).map((family) => ({ family, bold: false, italic: false }));
       await Promise.all(regular.map(loadFace));
       const ranked = regular.map(score).sort((a, b) => b.score - a.score);
-      const styled = ranked.slice(0, 2).flatMap((r) => [
-        { family: r.face.family, bold: true, italic: false },
-        { family: r.face.family, bold: false, italic: true },
-        { family: r.face.family, bold: true, italic: true },
-      ]);
+      const styled = ranked.slice(0, 2).flatMap((r) => facesOf(r.face.family).slice(1));
       await Promise.all(styled.map(loadFace));
-      candidates = [...ranked.slice(0, 2), ...styled.map(score)].sort((a, b) => b.score - a.score).slice(0, 3);
+      candidates = [...ranked.slice(0, 3), ...styled.map(score)].sort((a, b) => b.score - a.score).slice(0, 3);
     } else {
-      const face = { family: FAMILIES[1], bold: false, italic: false };
+      const face = { family: familyFor("sans"), bold: false, italic: false };
       await loadFace(face);
       candidates = [{ face, score: 0, px: fallbackPx, stretch: 1 }];
     }
 
-    // 3. Size, width, stroke weight, blur and ink strength: draw the words each
-    // way, line each up with the scanned word (by its centre of ink, which blur
-    // doesn't move), and keep whatever matches the scan most closely. The best
-    // few fonts are each fitted fully (bold vs. a heavier regular, say, only
-    // separate once blur is accounted for).
+    // 3. Blur and ink strength come from the scan alone: sharpen the scanned
+    // words to pure black and white, and find the blur that turns them back
+    // into the scan. (Fitting them along with a font that doesn't quite match,
+    // like most fonts against handwriting, would just blur everything.)
     const sample = targets.slice(0, 5);
     const centres = sample.map((t) => centroid(t.local));
-    const fitFace = (cand: ReturnType<typeof score>) => {
-      const { face } = cand;
-      let size = Number.isFinite(cand.px) ? cand.px : fallbackPx;
-      let stretch = Number.isFinite(cand.stretch) ? Math.min(1.3, Math.max(0.75, cand.stretch)) : 1;
-      const error = (px: number, st: number, stroke: number, sigma: number) => {
-        const placed = sample.map((t, i) => placeWord(face, px, st, stroke, sigma, t.text, t.local.w, t.local.h, centres[i]));
+    const sharp = sample.map((t) => plane(t.local.w, t.local.h, t.local.data.map((v) => (v >= 0.5 ? 1 : 0))));
+    let sigma = 0;
+    let gain = 1;
+    if (!bilevel && sample.length) {
+      let bestErr = Infinity;
+      for (const s of SIGMAS) {
+        const blurred = sharp.map((b) => blur(b, s));
         let pt = 0;
         let pp = 0;
-        placed.forEach((p, i) => {
-          const t = sample[i].local.data;
-          for (let k = 0; k < p.data.length; k++) {
-            pt += p.data[k] * t[k];
-            pp += p.data[k] * p.data[k];
+        blurred.forEach((b, i) => {
+          for (let k = 0; k < b.data.length; k++) {
+            pt += b.data[k] * sample[i].local.data[k];
+            pp += b.data[k] * b.data[k];
           }
         });
-        const gain = bilevel ? 1 : Math.min(2, Math.max(0.6, pp ? pt / pp : 1));
-        let err = 0;
-        placed.forEach((p, i) => {
-          const t = sample[i].local.data;
-          for (let k = 0; k < p.data.length; k++) {
-            const v = Math.min(1, gain * p.data[k]);
-            err += ((bilevel ? (v >= 0.5 ? 1 : 0) : v) - t[k]) ** 2;
-          }
+        const g = Math.min(2, Math.max(0.6, pp ? pt / pp : 1));
+        let e = 0;
+        blurred.forEach((b, i) => {
+          for (let k = 0; k < b.data.length; k++) e += (Math.min(1, g * b.data[k]) - sample[i].local.data[k]) ** 2;
         });
-        return { gain, err };
-      };
-      let fit = { weight: 0, sigma: 0, gain: 1, err: Infinity };
-      const fitLook = (weights: number[], sigmas: number[]) => {
-        fit = { weight: 0, sigma: 0, gain: 1, err: Infinity };
-        for (const weight of weights) {
-          for (const sigma of bilevel ? [0] : sigmas) {
-            const e = error(size, stretch, weight * size, sigma);
-            if (e.err < fit.err) fit = { weight: weight * size, sigma, ...e };
-          }
+        if (e < bestErr) [bestErr, sigma, gain] = [e, s, g];
+      }
+    }
+    // How thick the scan's strokes are (pen or print weight).
+    const scanStroke = median(sharp.map(strokeWidth));
+
+    // 4. Size, width, slant and weight for each of the best few fonts: draw the
+    // words each way, line each up with the scanned word (by its centre of ink,
+    // which blur doesn't move), and keep whatever matches the scan most closely.
+    const error = (p: Pen) => {
+      const placed = sample.map((t, i) => placeWord(p, sigma, t.text, t.local.w, t.local.h, centres[i]));
+      let pt = 0;
+      let pp = 0;
+      placed.forEach((pl, i) => {
+        const t = sample[i].local.data;
+        for (let k = 0; k < pl.data.length; k++) {
+          pt += pl.data[k] * t[k];
+          pp += pl.data[k] * pl.data[k];
         }
+      });
+      const g = bilevel ? 1 : Math.min(2, Math.max(0.6, pp ? pt / pp : 1));
+      let e = 0;
+      placed.forEach((pl, i) => {
+        const t = sample[i].local.data;
+        for (let k = 0; k < pl.data.length; k++) {
+          const v = Math.min(1, g * pl.data[k]);
+          e += ((bilevel ? (v >= 0.5 ? 1 : 0) : v) - t[k]) ** 2;
+        }
+      });
+      return e;
+    };
+    const tune = (values: number[], apply: (v: number) => Pen) => {
+      let bestV = values[0];
+      let bestE = Infinity;
+      for (const v of values) {
+        const e = error(apply(v));
+        if (e < bestE) [bestV, bestE] = [v, e];
+      }
+      return bestV;
+    };
+    const fitFace = (cand: ReturnType<typeof score>) => {
+      const pen: Pen = {
+        face: cand.face,
+        px: Number.isFinite(cand.px) ? cand.px : fallbackPx,
+        stretch: Number.isFinite(cand.stretch) ? Math.min(1.3, Math.max(0.7, cand.stretch)) : 1,
+        shear: 0,
+        stroke: 0,
       };
       if (sample.length) {
-        fitLook(WEIGHTS, SIGMAS);
-        // Fine-tune the height, keeping the words' width (blur makes letters
-        // look taller than they are), then the width.
-        let bestSize = { f: 1, err: fit.err };
-        for (let f = 0.86; f <= 1.081; f += 0.02) {
-          const e = error(size * f, stretch / f, fit.weight * f, fit.sigma);
-          if (e.err < bestSize.err) bestSize = { f, err: e.err };
-        }
-        size *= bestSize.f;
-        stretch /= bestSize.f;
-        let bestStretch = { f: 1, err: Infinity };
-        for (let f = 0.94; f <= 1.061; f += 0.02) {
-          const e = error(size, stretch * f, fit.weight * bestSize.f, fit.sigma);
-          if (e.err < bestStretch.err) bestStretch = { f, err: e.err };
-        }
-        stretch = Math.min(1.3, Math.max(0.75, stretch * bestStretch.f));
-        // Then the look again, close to what was found.
-        const w = WEIGHTS.indexOf(Math.round((fit.weight / size) * 1000) / 1000);
-        const near = <T,>(xs: T[], i: number) => xs.slice(Math.max(0, i - 1), i + 2);
-        fitLook(w >= 0 ? near(WEIGHTS, w) : WEIGHTS, near(SIGMAS, SIGMAS.indexOf(fit.sigma)));
+        // Height, keeping the words' width (blur makes letters look taller than they are).
+        const f = tune([0.86, 0.88, 0.9, 0.92, 0.94, 0.96, 0.98, 1, 1.02, 1.04, 1.06, 1.08], (v) => ({ ...pen, px: pen.px * v, stretch: pen.stretch / v }));
+        pen.px *= f;
+        pen.stretch /= f;
+        // Slant (handwriting, or text set at an angle), then width.
+        pen.shear = tune(SHEARS, (v) => ({ ...pen, shear: v }));
+        pen.stretch = Math.min(1.3, Math.max(0.7, pen.stretch * tune([0.94, 0.96, 0.98, 1, 1.02, 1.04, 1.06], (v) => ({ ...pen, stretch: pen.stretch * v }))));
+        // A heavier pen or print: thicken the font's strokes to the scan's.
+        const fontStroke = median(sample.map((t, i) => strokeWidth(threshold(placeWord(pen, sigma, t.text, t.local.w, t.local.h, centres[i])))));
+        if (Number.isFinite(scanStroke) && Number.isFinite(fontStroke)) pen.stroke = Math.min(pen.px * 0.12, Math.max(0, scanStroke - fontStroke));
       }
-      return { face, size, stretch, fit, score: cand.score };
+      // Fonts that only fit when squeezed or stretched are less likely to be the one.
+      const err = sample.length ? error(pen) * (1 + 3 * Math.abs(Math.log(pen.stretch))) : 0;
+      return { pen, err, score: cand.score };
     };
-    const best = candidates.map(fitFace).sort((a, b) => a.fit.err - b.fit.err)[0];
-    const { face, size, stretch, fit } = best;
+    const best = candidates.map(fitFace).sort((a, b) => a.err - b.err)[0];
+    const { pen } = best;
+    // Last check, over the whole line: its overall height should match the scan's.
+    // (A few short handwritten words can mislead the size.)
+    const lineInk = inkBox(cover, 0.35);
+    const drawnLine = inkOf(pen, line.text, sigma);
+    if (lineInk && drawnLine && line.words.length >= 2) {
+      const ratio = (lineInk[3] - lineInk[1]) / drawnLine.h;
+      if (Math.abs(ratio - 1) > 0.1) {
+        const f = Math.min(1.33, Math.max(0.75, ratio));
+        pen.px *= f;
+        pen.stroke *= f;
+        pen.stretch /= f;
+      }
+    }
+    const hand = pen.face.family.generic === "hand";
 
-    // 4. The scan's own letters.
-    const glyphs = new Map<string, Glyph>();
+    // 5. The scan's own letters (a few of each) and whole words.
+    const letters = new Map<string, Cutout[]>();
+    const words = new Map<string, Cutout>();
     for (const source of [line, ...others]) {
       const baseline = this.toPx([0, source.origin[1]])[1];
       for (const letter of source.letters) {
         if (!/[\p{L}\p{N}]/u.test(letter.text)) continue;
-        const g = this.glyph(letter, baseline, paperLum, inkLum);
+        const g = this.cutLetter(letter, baseline, paperLum, inkLum);
         if (!g) continue;
-        const checked = this.verify(g, letter.text, face, size, stretch, fit.weight, fit.sigma);
+        const checked = this.verify(g, letter.text, pen, sigma, hand);
         if (checked === null) continue;
-        const had = glyphs.get(letter.text);
-        if (!had || checked > had.score) glyphs.set(letter.text, { ...g, score: checked });
+        const list = letters.get(letter.text) ?? [];
+        list.push({ ...g, score: checked });
+        list.sort((a, b) => b.score - a.score);
+        letters.set(letter.text, list.slice(0, 3));
+      }
+      for (const word of source.words) {
+        if ([...word.text].length < 2 || (word.confidence ?? 0) < 75) continue;
+        const cut = this.cutWord(word, paperLum, inkLum);
+        const had = words.get(word.text);
+        if (cut && (!had || cut.score > had.score)) words.set(word.text, cut);
       }
     }
 
     return {
-      face,
-      px: size,
-      stretch,
-      weight: fit.weight,
-      sigma: fit.sigma,
-      gain: fit.gain,
+      face: pen.face,
+      px: pen.px,
+      stretch: pen.stretch,
+      shear: pen.shear,
+      weight: pen.stroke,
+      sigma,
+      gain,
       // Ink gets the same grain as the paper (the scanner's noise).
       noise: bilevel ? 0 : paperSd,
       bilevel,
+      hand,
       ink,
       paper,
       paperSd,
-      glyphs,
+      letters,
+      words,
       match: Math.max(0, Math.min(1, best.score)),
     };
   }
 
-  /** Cuts one letter out of the scan, if it stands apart from its neighbours. */
-  private glyph(letter: OcrLetter, baseline: number, paperLum: number, inkLum: number): Omit<Glyph, "score"> | null {
-    const lb = this.boxPx(letter.bbox);
-    const padX = Math.ceil((lb[2] - lb[0]) * 0.5) + 3;
-    const region: Box = [Math.max(0, lb[0] - padX), Math.max(0, lb[1] - 4), Math.min(this.width, lb[2] + padX), Math.min(this.height, lb[3] + 4)];
+  /** Cuts blobs of ink out of `box` (scan pixels): those `keepBlob` accepts. */
+  private cut(box: Box, padX: number, baseline: number, paperLum: number, inkLum: number, keepBlob: (c: { x0: number; y0: number; x1: number; y1: number; count: number }, inner: Box) => boolean | null): Omit<Cutout, "score"> | null {
+    const region: Box = [Math.max(0, box[0] - padX), Math.max(0, box[1] - 4), Math.min(this.width, box[2] + padX), Math.min(this.height, box[3] + 4)];
     const cover = this.coverage(region, paperLum, inkLum);
     const { w, h } = cover;
     const mask = new Uint8Array(w * h);
     for (let i = 0; i < mask.length; i++) mask[i] = cover.data[i] > 0.45 ? 1 : 0;
     const { labels, list } = components(mask, w, h);
-    const [lx0, ly0, lx1, ly1] = [lb[0] - region[0], lb[1] - region[1], lb[2] - region[0], lb[3] - region[1]];
+    const inner: Box = [box[0] - region[0], box[1] - region[1], box[2] - region[0], box[3] - region[1]];
     const own = new Set<number>();
     for (const c of list) {
-      const overlapsX = c.x1 > lx0 + 1 && c.x0 < lx1 - 1;
-      const overlapsY = c.y1 > ly0 && c.y0 < ly1;
-      if (!overlapsX || !overlapsY || c.count < 3) continue;
-      // A blob running into the next letter means the letters touch: can't cut it cleanly.
-      if (c.x0 < lx0 - 2 || c.x1 > lx1 + 2) return null;
-      own.add(c.id);
+      const keep = keepBlob(c, inner);
+      if (keep === null) return null;
+      if (keep) own.add(c.id);
     }
-    if (own.size === 0 || own.size > 3) return null;
-    const mine = new Uint8Array(w * h);
+    if (own.size === 0) return null;
     let [x0, y0, x1, y1] = [w, h, 0, 0];
     for (const c of list) {
       if (!own.has(c.id)) continue;
@@ -497,6 +578,7 @@ export class ScanPicture {
       x1 = Math.max(x1, c.x1);
       y1 = Math.max(y1, c.y1);
     }
+    const mine = new Uint8Array(w * h);
     for (let i = 0; i < labels.length; i++) mine[i] = own.has(labels[i]) ? 1 : 0;
     const keep = dilate(mine, w, h, 2);
     const pad = 2;
@@ -505,128 +587,238 @@ export class ScanPicture {
     const cw = Math.min(w, x1 + pad) - cx0;
     const ch = Math.min(h, y1 + pad) - cy0;
     const alpha = plane(cw, ch);
-    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
-      const i = (cy0 + y) * w + cx0 + x;
-      alpha.data[y * cw + x] = keep[i] ? cover.data[i] : 0;
+    for (let y = 0; y < ch; y++) {
+      for (let x = 0; x < cw; x++) {
+        const i = (cy0 + y) * w + cx0 + x;
+        alpha.data[y * cw + x] = keep[i] ? cover.data[i] : 0;
+      }
     }
-    return { alpha, top: region[1] + cy0 - baseline, centre: (x0 + x1) / 2 - cx0 };
+    return { alpha, top: region[1] + cy0 - baseline, left: x0 - cx0, width: x1 - x0 };
+  }
+
+  /** Cuts one letter out of the scan, if it stands apart from its neighbours. */
+  private cutLetter(letter: OcrLetter, baseline: number, paperLum: number, inkLum: number): Omit<Cutout, "score"> | null {
+    const lb = this.boxPx(letter.bbox);
+    let blobs = 0;
+    const g = this.cut(lb, Math.ceil((lb[2] - lb[0]) * 0.5) + 3, baseline, paperLum, inkLum, (c, [lx0, ly0, lx1, ly1]) => {
+      const overlapsX = c.x1 > lx0 + 1 && c.x0 < lx1 - 1;
+      const overlapsY = c.y1 > ly0 && c.y0 < ly1;
+      if (!overlapsX || !overlapsY || c.count < 3) return false;
+      // A blob running into the next letter means the letters touch: can't cut it cleanly.
+      if (c.x0 < lx0 - 2 || c.x1 > lx1 + 2) return null;
+      blobs++;
+      return true;
+    });
+    return g && blobs <= 3 ? g : null;
+  }
+
+  /** Cuts a whole word out of the scan (handwriting is often joined up, so words cut better than letters). */
+  private cutWord(word: OcrWord, paperLum: number, inkLum: number): Cutout | null {
+    const wb = this.boxPx(word.bbox);
+    const baseline = this.toPx([0, word.baseline])[1];
+    const cut = this.cut(wb, 6, baseline, paperLum, inkLum, (c, [wx0, wy0, wx1, wy1]) => {
+      if (c.count < 3) return false;
+      const ix = Math.max(0, Math.min(c.x1, wx1) - Math.max(c.x0, wx0));
+      const iy = Math.max(0, Math.min(c.y1, wy1) - Math.max(c.y0, wy0));
+      const inside = (ix * iy) / Math.max(1, (c.x1 - c.x0) * (c.y1 - c.y0));
+      // Mostly inside: part of the word. A little: a neighbour's stroke poking in (left out).
+      return inside >= 0.6;
+    });
+    return cut && { ...cut, score: word.confidence ?? 0 };
   }
 
   /** Checks a cut-out letter really looks like that letter in the fitted font. Returns a 0–1 score, or null. */
-  private verify(g: Omit<Glyph, "score">, ch: string, face: Face, px: number, stretch: number, weight: number, sigma: number): number | null {
+  private verify(g: Omit<Cutout, "score">, ch: string, pen: Pen, sigma: number, hand: boolean): number | null {
     const ink = inkBox(g.alpha, 0.45);
-    const r = inkOf(face, px, stretch, weight, ch);
+    const r = inkOf(pen, ch);
     if (!ink || !r) return null;
     const gw = ink[2] - ink[0];
     const gh = ink[3] - ink[1];
-    if (gh < r.h * 0.8 || gh > r.h * 1.25) return null;
-    if (Math.abs(gw - r.w) > Math.max(3, r.w * 0.4)) return null;
+    // Handwriting varies more, so it gets more leeway.
+    const [lo, hi, wide, minScore] = hand ? [0.7, 1.4, 0.6, 0.45] : [0.8, 1.25, 0.4, 0.6];
+    if (gh < r.h * lo || gh > r.h * hi) return null;
+    if (Math.abs(gw - r.w) > Math.max(3, r.w * wide)) return null;
     // Same height above the baseline as the font's letter.
-    const m = measure(face, px, ch);
-    const fontTop = -m.actualBoundingBoxAscent;
-    if (Math.abs(g.top + ink[1] - fontTop) > Math.max(2, px * 0.12)) return null;
+    const fontTop = -measure(pen.face, pen.px, ch).actualBoundingBoxAscent;
+    if (Math.abs(g.top + ink[1] - fontTop) > Math.max(2, pen.px * (hand ? 0.2 : 0.12))) return null;
     const target = crop(g.alpha, ink[0], ink[1], gw, gh);
     const s = ncc(blur(resize(r, gw, gh), Math.max(0.6, sigma)).data, blur(target, 0.6).data);
-    return s >= 0.6 ? s : null;
+    return s >= minScore ? s : null;
   }
 
   /** Paints `text` over the line in the line's look. */
   async paint(line: ScanLine, look: LineLook, text: string, opts: PaintOptions): Promise<Painted> {
-    const face: Face = opts.style
-      ? { family: opts.style.generic === look.face.family.generic ? look.face.family : familyFor(opts.style.generic), bold: opts.style.bold, italic: opts.style.italic }
-      : look.face;
+    const chosen = opts.family ? familyByCss(opts.family) : undefined;
+    const family = chosen ?? (opts.style ? (opts.style.generic === look.face.family.generic ? look.face.family : familyFor(opts.style.generic)) : look.face.family);
+    const face: Face = { family, bold: opts.style?.bold ?? look.face.bold, italic: opts.style?.italic ?? look.face.italic };
     await loadFace(face);
-    const px = look.px * opts.sizeScale;
     const sameFace = face.family === look.face.family && face.bold === look.face.bold && face.italic === look.face.italic;
     const reuse = opts.letters !== false && sameFace && Math.abs(opts.sizeScale - 1) < 0.03;
-    const weight = look.weight * opts.sizeScale;
-    const { stretch, sigma } = look;
-    const chars = [...text];
-    const advance: number[] = [];
-    {
+    const hand = family.generic === "hand";
+    const pen: Pen = { face, px: look.px * opts.sizeScale, stretch: look.stretch, shear: chosen && !sameFace ? 0 : look.shear, stroke: look.weight * opts.sizeScale };
+    const { sigma } = look;
+    const rand = random(hash(`${line.bbox.join()}|${text}`));
+    const m = (s: string) => measure(face, pen.px, s);
+
+    // Lay the text out: the scan's own words and letters where we have them,
+    // the fitted font elsewhere. Handwriting wobbles a little.
+    type Op = { kind: "font"; ch: string; x: number; dy: number; rotate: number; scale: number } | { kind: "cut"; cut: Cutout; left: number };
+    const ops: Op[] = [];
+    const placedWords: { text: string; x0: number; x1: number }[] = [];
+    const used = new Map<string, number>();
+    const phase = rand() * Math.PI * 2;
+    let x = 0;
+    let index = 0;
+    for (const token of text.split(/(\s+)/)) {
+      if (!token) continue;
+      if (!token.trim()) {
+        x += m(token).width * pen.stretch * (hand ? 1 + gaussian(rand) * 0.15 : 1);
+        continue;
+      }
+      const start = x;
+      const lead = m([...token][0]).actualBoundingBoxLeft * pen.stretch;
+      const whole = reuse ? look.words.get(token) : undefined;
+      if (whole) {
+        const left = x - lead;
+        ops.push({ kind: "cut", cut: whole, left });
+        const last = [...token].at(-1)!;
+        const lm = m(last);
+        x = left + whole.width + Math.max(0, (lm.width - lm.actualBoundingBoxRight) * pen.stretch);
+        placedWords.push({ text: token, x0: left, x1: left + whole.width });
+        index += token.length;
+        continue;
+      }
+      const chars = [...token];
+      // Handwriting: mixing the writer's own letters with font letters inside one
+      // word looks odd, so only do it when (nearly) the whole word is covered.
+      const covered = chars.filter((c) => look.letters.has(c)).length / chars.length;
+      const mix = !look.hand || covered >= 0.8;
       let prefix = "";
       for (const ch of chars) {
-        advance.push(measure(face, px, prefix).width * stretch);
+        const cx = start + m(prefix).width * pen.stretch;
         prefix += ch;
+        const own = reuse && mix ? look.letters.get(ch) : undefined;
+        if (own?.length) {
+          const k = used.get(ch) ?? 0;
+          used.set(ch, k + 1);
+          const cut = own[k % own.length];
+          const cm = m(ch);
+          const centre = cx + ((cm.actualBoundingBoxRight - cm.actualBoundingBoxLeft) / 2) * pen.stretch;
+          ops.push({ kind: "cut", cut, left: centre - cut.width / 2 });
+        } else {
+          const wobble = hand ? Math.sin(index * 0.7 + phase) * 0.02 * pen.px : 0;
+          ops.push({
+            kind: "font",
+            ch,
+            x: cx,
+            dy: hand ? wobble + gaussian(rand) * 0.025 * pen.px : 0,
+            rotate: hand ? gaussian(rand) * 0.035 : 0,
+            scale: hand ? 1 + gaussian(rand) * 0.035 : 1,
+          });
+        }
+        index++;
       }
-      advance.push(measure(face, px, prefix).width * stretch);
+      x = start + m(token).width * pen.stretch + (hand ? gaussian(rand) * 0.04 * pen.px : 0);
+      placedWords.push({ text: token, x0: start - lead, x1: x });
     }
+    const total = x;
 
-    // Where the old line's ink is.
+    // Where the old line's ink is, and where the new text starts.
     const lineBox = this.boxPx(line.bbox, 2);
     const oldCover = this.coverage(lineBox, lumOf(look.paper), lumOf(look.ink));
     const oldInk = inkBox(oldCover, 0.3) ?? [0, 0, lineBox[2] - lineBox[0], lineBox[3] - lineBox[1]];
-    const inkLeft = lineBox[0] + oldInk[0];
     const baseline = this.toPx([0, line.origin[1]])[1];
-    const first = chars.find((c) => c.trim()) ?? "x";
-    const lead = measure(face, px, first).actualBoundingBoxLeft * stretch;
-    const firstAt = advance[chars.indexOf(first)] ?? 0;
-    const originX = inkLeft + lead - firstAt;
+    // The new text's first ink lines up with the old line's first ink.
+    const originX = lineBox[0] + oldInk[0] - (placedWords[0]?.x0 ?? 0);
 
     // The piece of the scan that changes.
-    const margin = Math.ceil(sigma * 3 + weight + 3);
-    const x0 = Math.max(0, Math.floor(Math.min(lineBox[0] + oldInk[0], originX) - margin));
-    const y0 = Math.max(0, Math.floor(Math.min(lineBox[1] + oldInk[1], baseline - px * 1.05) - margin));
-    const x1 = Math.min(this.width, Math.ceil(Math.max(lineBox[0] + oldInk[2], originX + advance[chars.length] + px * 0.3) + margin));
-    const y1 = Math.min(this.height, Math.ceil(Math.max(lineBox[1] + oldInk[3], baseline + px * 0.32) + margin));
+    const pad = Math.ceil(sigma * 3 + pen.stroke + 3 + Math.abs(pen.shear) * pen.px);
+    const cuts = ops.filter((o): o is Extract<Op, { kind: "cut" }> => o.kind === "cut");
+    const x0 = Math.max(0, Math.floor(Math.min(lineBox[0] + oldInk[0], originX, ...cuts.map((c) => originX + c.left - c.cut.left)) - pad));
+    const y0 = Math.max(0, Math.floor(Math.min(lineBox[1] + oldInk[1], baseline - pen.px * 1.05, ...cuts.map((c) => baseline + c.cut.top)) - pad));
+    // A little extra on the right, so unread old writing under the new text can be removed whole.
+    const x1 = Math.min(this.width, Math.ceil(Math.max(lineBox[0] + oldInk[2], originX + total + pen.px * 1.5, ...cuts.map((c) => originX + c.left - c.cut.left + c.cut.alpha.w)) + pad));
+    const y1 = Math.min(this.height, Math.ceil(Math.max(lineBox[1] + oldInk[3], baseline + pen.px * 0.35, ...cuts.map((c) => baseline + c.cut.top + c.cut.alpha.h)) + pad));
     const w = x1 - x0;
     const h = y1 - y0;
-    const window: Box = [x0, y0, x1, y1];
-    const rgba = this.pixels(window);
-    const cover = this.coverage(window, lumOf(look.paper), lumOf(look.ink));
+    const rgba = this.pixels([x0, y0, x1, y1]);
+    const cover = this.coverage([x0, y0, x1, y1], lumOf(look.paper), lumOf(look.ink));
 
     // Cover the old words with paper.
-    const rand = random(hash(`${line.bbox.join()}|${text}`));
     const old = new Uint8Array(w * h);
     const inkMask = new Uint8Array(w * h);
     for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const i = y * w + x;
+      for (let xx = 0; xx < w; xx++) {
+        const i = y * w + xx;
         const inked = cover.data[i] > 0.12;
         inkMask[i] = inked ? 1 : 0;
-        const gx = x + x0;
+        const gx = xx + x0;
         const gy = y + y0;
         if (inked && gx >= lineBox[0] && gx < lineBox[2] && gy >= lineBox[1] && gy < lineBox[3]) old[i] = 1;
+      }
+    }
+    // OCR sometimes skips words (messy handwriting especially). Old ink on this
+    // line that the new text would land on goes too, whole blobs at a time, so
+    // nothing old shows through or under the new words.
+    {
+      const solid = new Uint8Array(w * h);
+      for (let i = 0; i < w * h; i++) solid[i] = cover.data[i] > 0.45 ? 1 : 0;
+      const { labels, list } = components(solid, w, h);
+      const span0 = originX + (placedWords[0]?.x0 ?? 0) - x0;
+      const span1 = originX + total - x0;
+      const band0 = lineBox[1] - y0;
+      const band1 = lineBox[3] - y0;
+      const hit = new Set<number>();
+      for (const c of list) {
+        const inBand = Math.min(c.y1, band1) - Math.max(c.y0, band0);
+        if (c.x1 > span0 && c.x0 < span1 && inBand >= (c.y1 - c.y0) * 0.5) hit.add(c.id);
+      }
+      // Finish words that were started: take neighbouring blobs on the line closer than a word gap.
+      const gap = pen.px * 0.3;
+      let grew = hit.size > 0;
+      while (grew) {
+        grew = false;
+        for (const c of list) {
+          if (hit.has(c.id)) continue;
+          const inBand = Math.min(c.y1, band1) - Math.max(c.y0, band0);
+          if (inBand < (c.y1 - c.y0) * 0.5) continue;
+          if (list.some((d) => hit.has(d.id) && c.x0 - d.x1 < gap && d.x0 - c.x1 < gap)) {
+            hit.add(c.id);
+            grew = true;
+          }
+        }
+      }
+      if (hit.size) {
+        const blobs = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) blobs[i] = hit.has(labels[i]) ? 1 : 0;
+        const near = dilate(blobs, w, h, 2);
+        for (let i = 0; i < w * h; i++) if (near[i] && inkMask[i]) old[i] = 1;
       }
     }
     const erase = dilate(old, w, h, Math.ceil(sigma + 1));
     fillPaper(rgba, w, h, erase, inkMask, rand, look.paper, look.paperSd);
 
-    // Draw the new words: the scan's own letters where we have them, the fitted font elsewhere.
-    const reused = new Set<number>();
-    if (reuse) chars.forEach((ch, i) => look.glyphs.has(ch) && reused.add(i));
+    // Draw: font letters (blurred like the scan), then the scan's own cut-outs.
     const drawn = drawPlane(w, h, (ctx) => {
-      ctx.font = cssFont(face, px);
-      chars.forEach((ch, i) => {
-        if (!ch.trim() || reused.has(i)) return;
-        ctx.setTransform(stretch, 0, 0, 1, originX - x0 + advance[i], baseline - y0);
-        ctx.fillText(ch, 0, 0);
-        if (weight > 0) {
-          ctx.lineWidth = weight;
-          ctx.strokeText(ch, 0, 0);
-        }
-      });
+      for (const op of ops) if (op.kind === "font") drawText(ctx, pen, op.ch, originX - x0 + op.x, baseline - y0 + op.dy, op.rotate, op.scale);
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      const thick = Math.max(1, px * 0.06);
-      const width = advance[chars.length];
-      if (opts.underline) ctx.fillRect(originX - x0, baseline - y0 + px * 0.12, width, thick);
-      if (opts.strike) ctx.fillRect(originX - x0, baseline - y0 - px * 0.3, width, thick);
+      const thick = Math.max(1, pen.px * 0.06);
+      if (opts.underline) ctx.fillRect(originX - x0, baseline - y0 + pen.px * 0.12, total, thick);
+      if (opts.strike) ctx.fillRect(originX - x0, baseline - y0 - pen.px * 0.3, total, thick);
     });
     const ink = blur(drawn, sigma);
     for (let i = 0; i < ink.data.length; i++) ink.data[i] = Math.min(1, ink.data[i] * look.gain);
-    for (const i of reused) {
-      const g = look.glyphs.get(chars[i])!;
-      const m = measure(face, px, chars[i]);
-      const centre = originX + advance[i] + ((m.actualBoundingBoxRight - m.actualBoundingBoxLeft) / 2) * stretch;
-      const gx = Math.round(centre - g.centre - x0);
-      const gy = Math.round(baseline + g.top - y0);
-      for (let y = 0; y < g.alpha.h; y++) {
-        for (let x = 0; x < g.alpha.w; x++) {
-          const tx = gx + x;
+    for (const op of cuts) {
+      const { alpha, top, left } = op.cut;
+      const gx = Math.round(originX + op.left - left - x0);
+      const gy = Math.round(baseline + top - y0);
+      for (let y = 0; y < alpha.h; y++) {
+        for (let xx = 0; xx < alpha.w; xx++) {
+          const tx = gx + xx;
           const ty = gy + y;
           if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
           const k = ty * w + tx;
-          ink.data[k] = Math.max(ink.data[k], g.alpha.data[y * g.alpha.w + x]);
+          ink.data[k] = Math.max(ink.data[k], alpha.data[y * alpha.w + xx]);
         }
       }
     }
@@ -647,28 +839,13 @@ export class ScanPicture {
     const [bx0, by0] = this.toPage([x0, y0]);
     const [bx1, by1] = this.toPage([x1, y1]);
     // Word positions for the invisible text layer.
-    const words: OcrWord[] = [];
-    const top = this.toPage([0, baseline - px * 0.78])[1];
-    const bottom = this.toPage([0, baseline + px * 0.22])[1];
+    const top = this.toPage([0, baseline - pen.px * 0.78])[1];
+    const bottom = this.toPage([0, baseline + pen.px * 0.22])[1];
     const basePt = this.toPage([0, baseline])[1];
-    let i = 0;
-    while (i < chars.length) {
-      if (!chars[i].trim()) {
-        i++;
-        continue;
-      }
-      let j = i;
-      while (j < chars.length && chars[j].trim()) j++;
-      const [wx0] = this.toPage([originX + advance[i], 0]);
-      const [wx1] = this.toPage([originX + advance[j], 0]);
-      words.push({ text: chars.slice(i, j).join(""), bbox: [wx0, top, wx1, bottom], baseline: basePt });
-      i = j;
-    }
+    const words = placedWords.map((pw) => ({ text: pw.text, bbox: [this.toPage([originX + pw.x0, 0])[0], top, this.toPage([originX + pw.x1, 0])[0], bottom] as Box, baseline: basePt }));
     return { png, x: x0, y: y0, width: w, height: h, box: [bx0, by0, bx1, by1], words };
   }
 }
-
-const lumOf = (c: Rgb) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
 
 async function toPng(rgba: Uint8ClampedArray, w: number, h: number): Promise<Uint8Array> {
   const c = document.createElement("canvas");
