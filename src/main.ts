@@ -2,6 +2,7 @@ import "./style.css";
 import { warmUp } from "./core/client";
 import { h, icon } from "./ui/dom";
 import { lines, mascot, pick } from "./ui/fun";
+import { compareTool } from "./tools/compare";
 import { convertTool } from "./tools/convert";
 import { editTool } from "./tools/edit";
 import { mergeTool } from "./tools/merge";
@@ -17,6 +18,7 @@ const TOOLS = [
   { id: "split", label: "Split", icon: icon("scissors"), build: splitTool },
   { id: "edit", label: "Edit", icon: h("span.glyph-icon", { "aria-hidden": "true" }, "✎"), build: editTool },
   { id: "convert", label: "Convert", icon: h("span.glyph-icon", { "aria-hidden": "true" }, "⇄"), build: convertTool },
+  { id: "compare", label: "Compare", icon: h("span.glyph-icon", { "aria-hidden": "true" }, "⚖"), build: compareTool },
   { id: "ocr", label: "OCR", icon: h("span.glyph-icon", { "aria-hidden": "true" }, "🔍"), build: ocrTool },
 ] as const;
 type ToolId = (typeof TOOLS)[number]["id"];

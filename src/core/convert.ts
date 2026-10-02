@@ -111,6 +111,24 @@ export function imagesToPdf(images: Uint8Array[], options: ImageOptions): Uint8A
 
 // --- From PDF ----------------------------------------------------------------
 
+/** Each page's text as lines (for comparing documents). */
+export function pdfLines(input: PdfInput): string[][] {
+  const doc = openPdf(input);
+  try {
+    const pages: string[][] = [];
+    for (let i = 0; i < doc.countPages(); i++) {
+      const page = doc.loadPage(i);
+      const st = page.toStructuredText("");
+      pages.push(st.asText().split("\n"));
+      st.destroy();
+      page.destroy();
+    }
+    return pages;
+  } finally {
+    doc.destroy();
+  }
+}
+
 export function pdfToText(input: PdfInput): string {
   const doc = openPdf(input);
   try {

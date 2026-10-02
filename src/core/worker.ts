@@ -5,7 +5,8 @@ import { edit, inspect, merge, NotPdfError, openPdf, pageSizes, PasswordError, r
 import type { Request, Response } from "./protocol";
 import { addOcrLayer, pageHasText, textLines } from "./text";
 import { slidesToPdf } from "./slides";
-import { documentToPdf, htmlToPdf, imagesToPdf, pdfToDocx, pdfToHtml, pdfToImages, pdfToText } from "./convert";
+import { documentToPdf, htmlToPdf, imagesToPdf, pdfLines, pdfToDocx, pdfToHtml, pdfToImages, pdfToText } from "./convert";
+import { compareDocs } from "./compare";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -79,6 +80,10 @@ function handle(req: Request): { result: unknown; transfer?: Transferable[] } {
     }
     case "pdfToDocx":
       return bytesResult(pdfToDocx(req.input, req.title));
+    case "pdfLines":
+      return { result: pdfLines(req.input) };
+    case "compare":
+      return { result: req.others.map((o) => compareDocs(req.base, o, req.options)) };
     case "close":
       sessions.get(req.session)?.destroy();
       sessions.delete(req.session);

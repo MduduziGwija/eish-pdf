@@ -11,6 +11,7 @@ Free PDF tools that run entirely in your browser — nothing is uploaded, ever.
 | ✂️ **Split** | Every page, page ranges like `1-3, 5, 8-`, or pick pages from thumbnails. |
 | ✏️ **Edit** | **Edit text**: click any line of the PDF's own text and retype it. It keeps the same size, colour and position, and reuses the document's embedded font when it has the letters you type (otherwise the closest standard font: Helvetica/Arial, Times or Courier, matching bold/italic). **Add text** with a Word-style bar: font, size, bold, italic, underline, strikethrough, colour, alignment. Also draw or sign, highlight, and **erase** (content is truly removed, not just covered). Rotate, delete and reorder pages. Zoom, full-screen editing, undo with Ctrl+Z. |
 | ⇄ **Convert** | **To PDF:** Word (.docx: headings, bold, lists, tables, pictures), Excel (.xlsx: every sheet as a table, dates, merged cells, wide sheets on landscape pages), PowerPoint (.pptx: titles, bullets, text boxes and pictures in place on widescreen pages), pictures (JPG, PNG, WebP, SVG, GIF, BMP, TIFF; A4 or fit-to-picture pages), text, Markdown, web pages, EPUB, XPS, CBZ. Combine everything into one PDF, or one PDF per file. **From PDF:** Word (.docx with fonts, sizes, colours and pictures), PNG/JPG per page, plain text, or a web page. |
+| ⚖ **Compare** | See what's different between 2–10 PDFs. Pick the original as the base (★): each other PDF gets a similarity score, words added/removed, a "where they differ" table lining up every change across all files, a word-by-word view, and a visual mode that highlights changed areas (works on scans too). Download the comparison as a PDF report. |
 | 🔍 **OCR** | Makes scanned PDFs searchable: an invisible text layer is added under each page, so you can search, select and copy, while the page looks exactly the same. English and Afrikaans. Handles many files at once and skips pages that already have text. |
 
 Made by **Mduduzi Gwija**.
@@ -48,6 +49,7 @@ src/core/pdf.ts      PDF engine: inspect, unlock, merge, split, edit, render (Mu
 src/core/ranges.ts   page-range parsing ("1-3, 5, 8-")
 src/core/text.ts     reading text lines; writing text in matching or chosen fonts; OCR text layer
 src/core/ocrwords.ts converts OCR results to page positions
+src/core/compare.ts  text comparison (Myers diff on lines, then words)
 src/core/convert.ts  to-PDF and from-PDF conversions; src/core/docx.ts writes Word files
 src/core/slides.ts   draws PowerPoint slides as PDF pages
 src/convert/         reads Word (via Mammoth), Excel and PowerPoint files in the browser
