@@ -3,7 +3,7 @@ import { baselineOf, LINE_HEIGHT } from "../core/layout";
 import type { Annotation, PageEdit, PageSize, Rgb, Rotation } from "../core/pdf";
 import type { OcrWord, TextLine } from "../core/text";
 import { linesFromBlocks, type TesseractBlock } from "../core/ocrwords";
-import { startOcr, type OcrEngine } from "../ocr/engine";
+import { LANGUAGES, startOcr, type OcrEngine, type OcrLanguage } from "../ocr/engine";
 import { h, icon, reducedMotion, sleep, svg } from "../ui/dom";
 import { baseName, dropzone, formatSize, plural, readBytes, saveFile } from "../ui/files";
 import { celebrate, mascot, oops, pick, reveal } from "../ui/fun";
@@ -70,6 +70,14 @@ export function editTool(): HTMLElement {
   const scanWords = new Map<number, OcrWord[]>();
   const scanProgress = new Map<number, number>();
   let ocrEngine: Promise<OcrEngine> | undefined;
+  const scannedSources = new Set<number>();
+  let scanLanguage: OcrLanguage = "eng";
+  try {
+    const saved = localStorage.getItem("eish-scan-language");
+    if (LANGUAGES.some((l) => l.id === saved)) scanLanguage = saved as OcrLanguage;
+  } catch {
+    // Storage blocked: English it is.
+  }
   // Pictures placed in this edit, by id (annotations refer to them by id).
   const pictures = new Map<string, { png: Uint8Array; url: string }>();
   let pictureCount = 0;
@@ -159,11 +167,12 @@ export function editTool(): HTMLElement {
     const { width, height } = doc!.sizes[source];
     const scale = Math.min(300 / 72, 3600 / Math.max(width, height));
     scanProgress.set(source, 0);
+    scannedSources.add(source);
     showScanState(source);
     mascot.mood("read");
     mascot.say("A scanned page! Reading it so you can edit it…");
     try {
-      ocrEngine ??= startOcr("eng");
+      ocrEngine ??= startOcr(scanLanguage);
       const engine = await ocrEngine;
       const png = await pdf.render(session, source, scale);
       const blocks = await engine.read(png, (p) => {
@@ -195,6 +204,31 @@ export function editTool(): HTMLElement {
     }
   }
 
+  /** The "Scan language" dropdown, shown once a page turns out to be a scan. */
+  function scanLanguagePicker(source: number): HTMLElement {
+    const select = h("select.input.select.small", { "aria-label": "Language of the scanned page" });
+    for (const l of LANGUAGES) select.append(h("option", { value: l.id, selected: l.id === scanLanguage }, l.label));
+    select.addEventListener("change", () => {
+      scanLanguage = select.value as OcrLanguage;
+      try {
+        localStorage.setItem("eish-scan-language", scanLanguage);
+      } catch {
+        // Not remembered, that's fine.
+      }
+      // Read the scanned pages again in the new language.
+      void ocrEngine?.then((e) => e.stop()).catch(() => undefined);
+      ocrEngine = undefined;
+      for (const s of scannedSources) {
+        lineCache.delete(s);
+        scanWords.delete(s);
+      }
+      scannedSources.clear();
+      render();
+    });
+    const picker = h("label.option.scan-language", { hidden: !scannedSources.has(source) }, h("span", {}, "Scan language"), select);
+    return picker;
+  }
+
   /** Shows "reading…" progress on the page being edited, if it's this one. */
   function showScanState(source: number) {
     if (view.kind !== "page" || pages[view.index]?.source !== source) return;
@@ -202,6 +236,11 @@ export function editTool(): HTMLElement {
     const hint = workspace.querySelector<HTMLElement>(".tool-hint");
     const progress = scanProgress.get(source);
     stage?.classList.toggle("scanning", progress !== undefined);
+    const picker = workspace.querySelector<HTMLElement>(".scan-language");
+    if (picker) {
+      picker.hidden = !scannedSources.has(source);
+      picker.querySelector("select")!.disabled = progress !== undefined;
+    }
     if (progress !== undefined && hint && tool === "retext") hint.textContent = `Scanned page: reading it so you can edit it… ${Math.round(progress * 100)}%`;
   }
 
@@ -571,6 +610,7 @@ export function editTool(): HTMLElement {
       tool === "draw" && penSwatches,
       tool === "draw" && h("label.slider", {}, h("span", {}, "Thickness"), penInput),
       tool === "select" && h("button.btn.small.danger", { type: "button", disabled: selected === undefined, onclick: () => deleteSelected() }, "Delete selected"),
+      tool === "retext" && !rotatedRetext && scanLanguagePicker(p.source),
       h("span.tool-hint", {}, rotatedRetext ? "Edit text works on upright pages. Rotate this page back to change its text." : TOOLS.find((t) => t.id === tool)!.hint),
     );
 
@@ -1093,6 +1133,7 @@ export function editTool(): HTMLElement {
     void ocrEngine?.then((e) => e.stop()).catch(() => undefined);
     ocrEngine = undefined;
     scanWords.clear();
+    scannedSources.clear();
     closeActive(false);
     if (doc) closeSession(doc.session);
     doc = undefined;
