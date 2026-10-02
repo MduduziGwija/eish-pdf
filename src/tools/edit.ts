@@ -6,9 +6,11 @@ import { h, icon, reducedMotion, sleep, svg } from "../ui/dom";
 import { baseName, dropzone, formatSize, plural, readBytes, saveFile } from "../ui/files";
 import { celebrate, mascot, oops, pick, reveal } from "../ui/fun";
 import { closeSession, lazyThumb, renderUrl } from "../ui/thumbs";
+import { browserImageToPng, ENGINE_IMAGES } from "../convert/images";
 import { DEFAULT_FMT, familyCss, formatBar, rgbCss, styleElement, SWATCHES, type Fmt } from "./format";
+import { openSignatureDialog, type Picture } from "./signature";
 
-type Tool = "retext" | "text" | "draw" | "highlight" | "erase" | "select";
+type Tool = "retext" | "text" | "draw" | "image" | "sign" | "highlight" | "erase" | "select";
 type Point = [number, number];
 type Box = [number, number, number, number];
 type TextAnn = Extract<Annotation, { type: "text" }>;
@@ -36,10 +38,12 @@ const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
 const TOOLS: { id: Tool; label: string; hint: string; glyph: string }[] = [
   { id: "retext", label: "Edit text", hint: "Click a line of the PDF's own text to change it. Same font, size and colour.", glyph: "Aa" },
   { id: "text", label: "Add text", hint: "Click the page to type. Use the bar above to format.", glyph: "T" },
-  { id: "draw", label: "Draw / sign", hint: "Drag to draw or sign", glyph: "✎" },
+  { id: "draw", label: "Draw", hint: "Drag to draw freehand", glyph: "✎" },
+  { id: "image", label: "Add image", hint: "Pick a picture or logo. Drag it to move; pull a corner to resize.", glyph: "🖼" },
+  { id: "sign", label: "Sign", hint: "Draw, type or upload your signature, then place and resize it", glyph: "✍" },
   { id: "highlight", label: "Highlight", hint: "Drag over what matters", glyph: "▰" },
   { id: "erase", label: "Erase", hint: "Drag over content to remove it for real", glyph: "⌫" },
-  { id: "select", label: "Select", hint: "Click an edit, then Delete", glyph: "➚" },
+  { id: "select", label: "Select", hint: "Click an edit to select it. Drag pictures to move them, pull a corner to resize. Delete removes.", glyph: "➚" },
 ];
 
 export function editTool(): HTMLElement {
@@ -57,6 +61,9 @@ export function editTool(): HTMLElement {
   let enlarged = false;
   let active: Active | undefined;
   const lineCache = new Map<number, Promise<TextLine[]>>();
+  // Pictures placed in this edit, by id (annotations refer to them by id).
+  const pictures = new Map<string, { png: Uint8Array; url: string }>();
+  let pictureCount = 0;
 
   const workspace = h("div.edit-workspace", { hidden: true });
   const result = h("div.result-slot");
@@ -75,6 +82,8 @@ export function editTool(): HTMLElement {
       doc = { file, bytes, password, session, sizes };
       zone.hidden = true;
       pages = sizes.map((_, source) => ({ source, rotate: 0, annotations: [] }));
+      for (const pic of pictures.values()) URL.revokeObjectURL(pic.url);
+      pictures.clear();
       history = [];
       lineCache.clear();
       view = { kind: "grid" };
@@ -180,8 +189,9 @@ export function editTool(): HTMLElement {
           return a; // Stored in the page's original coordinates.
         case "ink":
           return { ...a, strokes: a.strokes.map((s) => s.map(map)) };
+        case "image":
         case "text": {
-          // Text stays upright: move its box by the centre, keep its size.
+          // Text and pictures stay upright: move the box by its centre, keep its size.
           const [w, hgt] = [a.rect[2] - a.rect[0], a.rect[3] - a.rect[1]];
           const [cx, cy] = map([(a.rect[0] + a.rect[2]) / 2, (a.rect[1] + a.rect[3]) / 2]);
           return { ...a, rect: [cx - w / 2, cy - hgt / 2, cx + w / 2, cy + hgt / 2] };
@@ -241,6 +251,16 @@ export function editTool(): HTMLElement {
         const f = fmtOf(a);
         const lines = a.text.split("\n");
         g.append(svgText(lines, f, a.rect, lines.map((_, k) => baselineOf(a.rect[1], a.size, k))));
+      } else if (a.type === "image") {
+        const im = document.createElementNS(SVG_NS, "image");
+        const [x0, y0, x1, y1] = a.rect;
+        im.setAttribute("href", pictures.get(a.image)?.url ?? "");
+        im.setAttribute("x", String(x0));
+        im.setAttribute("y", String(y0));
+        im.setAttribute("width", String(x1 - x0));
+        im.setAttribute("height", String(y1 - y0));
+        im.setAttribute("preserveAspectRatio", "none");
+        g.append(im);
       } else if (a.type === "replace") {
         g.append(rect(a.rect, "cover"));
         const f: Fmt = { ...DEFAULT_FMT, family: a.font.family, bold: a.font.bold, italic: a.font.italic, size: a.size, color: a.color, underline: !!a.underline, strike: !!a.strike };
@@ -251,6 +271,20 @@ export function editTool(): HTMLElement {
       const b = bounds(a);
       const hit = rect([b[0] - 3, b[1] - 3, b[2] + 3, b[3] + 3], "ann-hit");
       g.append(hit);
+      if (a.type === "image" && i === highlightIndex) {
+        // Corner handles for resizing.
+        const size = Math.max(6, Math.min(12, (a.rect[2] - a.rect[0]) / 5));
+        for (const [cx, cy, corner] of [
+          [a.rect[0], a.rect[1], "nw"],
+          [a.rect[2], a.rect[1], "ne"],
+          [a.rect[0], a.rect[3], "sw"],
+          [a.rect[2], a.rect[3], "se"],
+        ] as const) {
+          const hnd = rect([cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2], "handle");
+          hnd.dataset.corner = corner;
+          g.append(hnd);
+        }
+      }
       (a.type === "replace" ? original : layer).append(g);
     });
   }
@@ -398,6 +432,8 @@ export function editTool(): HTMLElement {
             title: t.hint,
             onclick: () => {
               closeActive();
+              if (t.id === "image") return void pickPicture();
+              if (t.id === "sign") return void signNow();
               tool = t.id;
               selected = undefined;
               render();
@@ -463,6 +499,7 @@ export function editTool(): HTMLElement {
     const linesLayer = document.createElementNS(SVG_NS, "g");
     linesLayer.classList.add("lines-layer");
     const annLayer = document.createElementNS(SVG_NS, "g");
+    annLayer.classList.add("ann-layer");
     layer.append(linesLayer, annLayer);
     drawAnnotations(annLayer, p, selected);
     const stage = h("div.stage", { style: `aspect-ratio:${W}/${H}` }, img, layer);
@@ -596,8 +633,58 @@ export function editTool(): HTMLElement {
       const start = toPoint(e);
 
       if (tool === "select") {
-        selected = annotationAt(e);
-        render();
+        const hitIndex = annotationAt(e);
+        const ann = hitIndex !== undefined ? p.annotations[hitIndex] : undefined;
+        if (ann?.type !== "image") {
+          selected = hitIndex;
+          render();
+          return;
+        }
+        // Move or resize a picture.
+        e.preventDefault();
+        selected = hitIndex;
+        const corner = (e.target as SVGElement).dataset?.corner;
+        const original: Box = [...ann.rect];
+        const aspect = (original[2] - original[0]) / Math.max(1, original[3] - original[1]);
+        const annLayer = layer.querySelector<SVGGElement>(".ann-layer")!;
+        layer.setPointerCapture(e.pointerId);
+        let moved = false;
+        const move = (ev: PointerEvent) => {
+          const [px, py] = toPoint(ev);
+          const dx = px - start[0];
+          const dy = py - start[1];
+          if (Math.abs(dx) + Math.abs(dy) > 1) moved = true;
+          if (!corner) {
+            // Keep the picture on the page.
+            const w = original[2] - original[0];
+            const hgt = original[3] - original[1];
+            const x0 = clamp(original[0] + dx, -w * 0.8, W - w * 0.2);
+            const y0 = clamp(original[1] + dy, -hgt * 0.8, H - hgt * 0.2);
+            ann.rect = [x0, y0, x0 + w, y0 + hgt];
+          } else {
+            // The opposite corner stays put; the shape keeps its proportions.
+            const fx = corner.includes("w") ? original[2] : original[0];
+            const fy = corner.includes("n") ? original[3] : original[1];
+            const w = Math.max(12, Math.abs(px - fx));
+            const hgt = w / aspect;
+            const x0 = corner.includes("w") ? fx - w : fx;
+            const y0 = corner.includes("n") ? fy - hgt : fy;
+            ann.rect = [x0, y0, x0 + w, y0 + hgt];
+          }
+          drawAnnotations(annLayer, p, selected);
+        };
+        const up = () => {
+          layer.removeEventListener("pointermove", move);
+          layer.removeEventListener("pointerup", up);
+          layer.removeEventListener("pointercancel", up);
+          const final: Box = [...ann.rect];
+          ann.rect = original;
+          if (moved) commit(() => (ann.rect = final));
+          else render();
+        };
+        layer.addEventListener("pointermove", move);
+        layer.addEventListener("pointerup", up);
+        layer.addEventListener("pointercancel", up);
         return;
       }
       if (tool === "retext") {
@@ -800,6 +887,63 @@ export function editTool(): HTMLElement {
     );
   }
 
+  // --- Pictures and signatures -----------------------------------------------
+
+  function usedPictures(): Record<string, Uint8Array> {
+    const out: Record<string, Uint8Array> = {};
+    for (const p of pages) for (const a of p.annotations) if (a.type === "image") out[a.image] = pictures.get(a.image)!.png;
+    return out;
+  }
+
+  /** Puts a picture in the middle of the page being edited, selected and ready to move. */
+  function placePicture(pic: Picture, maxWidthShare: number, label: string) {
+    if (view.kind !== "page") return;
+    const p = pages[view.index];
+    const { width: W, height: H } = shown(p);
+    const id = `pic-${++pictureCount}`;
+    pictures.set(id, { png: pic.png, url: URL.createObjectURL(new Blob([pic.png as BlobPart], { type: "image/png" })) });
+    // Natural size at 96 dpi, but no wider than a share of the page.
+    let w = Math.min(pic.width * 0.75, W * maxWidthShare);
+    let hgt = (w * pic.height) / pic.width;
+    if (hgt > H * 0.6) {
+      hgt = H * 0.6;
+      w = (hgt * pic.width) / pic.height;
+    }
+    const x0 = (W - w) / 2;
+    const y0 = (H - hgt) / 2;
+    tool = "select";
+    commit(() => {
+      p.annotations.push({ type: "image", rect: [x0, y0, x0 + w, y0 + hgt], image: id });
+      selected = p.annotations.length - 1;
+    });
+    mascot.flash("happy", label, 2200);
+  }
+
+  async function pickPicture() {
+    const input = h("input", { type: "file", accept: "image/*,.svg" }) as HTMLInputElement;
+    input.addEventListener("change", async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const png = ENGINE_IMAGES.test(file.name) && /\.(png|jpe?g)$/i.test(file.name) ? new Uint8Array(await file.arrayBuffer()) : await browserImageToPng(file);
+        const url = URL.createObjectURL(new Blob([png as BlobPart]));
+        const img = new Image();
+        img.src = url;
+        await img.decode();
+        URL.revokeObjectURL(url);
+        placePicture({ png, width: img.naturalWidth, height: img.naturalHeight }, 0.5, "Lekker picture! Drag it where you want it.");
+      } catch {
+        oops("That picture couldn't be opened. Try a JPG or PNG.");
+      }
+    });
+    input.click();
+  }
+
+  async function signNow() {
+    const sig = await openSignatureDialog();
+    if (sig) placePicture(sig, 0.32, "Signed, sealed, delivered. Sho!");
+  }
+
   // --- Saving --------------------------------------------------------------
 
   saveBtn.addEventListener("click", async () => {
@@ -807,7 +951,7 @@ export function editTool(): HTMLElement {
     closeActive();
     saveBtn.disabled = true;
     try {
-      const [bytes] = await mascot.busy(Promise.all([pdf.edit({ bytes: doc.bytes, password: doc.password }, pages), sleep(700)]));
+      const [bytes] = await mascot.busy(Promise.all([pdf.edit({ bytes: doc.bytes, password: doc.password }, pages, usedPictures()), sleep(700)]));
       const name = `${baseName(doc.file.name)}-edited.pdf`;
       const stamp = h("div.stamp", { "aria-hidden": "true" }, "LEKKER!");
       workspace.append(stamp);
@@ -857,8 +1001,12 @@ export function editTool(): HTMLElement {
     result,
   );
 
-  section.addEventListener("keydown", (e) => {
-    if ((e.target as Element).matches("input, textarea, select")) return;
+  // Shortcuts work whenever the editor is on screen, even if focus wandered
+  // off (e.g. after a dialog closes), but never while typing or in a dialog.
+  document.addEventListener("keydown", (e) => {
+    if (!doc || !section.isConnected || section.closest("[hidden]") || document.querySelector(".modal-backdrop")) return;
+    if ((e.target as Element).closest("input, textarea, select, [contenteditable]")) return;
+    if (!section.contains(e.target as Node) && e.target !== document.body) return;
     const mod = e.ctrlKey || e.metaKey;
     if (mod && e.key.toLowerCase() === "z") {
       e.preventDefault();

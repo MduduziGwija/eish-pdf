@@ -5,7 +5,7 @@ import { range } from "./ranges";
 import { baselineOf } from "./layout";
 
 export { baselineOf, LINE_HEIGHT } from "./layout";
-import { collectFonts, writeRuns, type FontStyle } from "./text";
+import { appendContent, collectFonts, toUserSpace, writeRuns, type FontStyle } from "./text";
 
 export { parsePageRanges, range } from "./ranges";
 
@@ -184,6 +184,8 @@ export type Annotation =
   | { type: "ink"; strokes: [number, number][][]; width: number; color: Rgb }
   | { type: "highlight"; rect: Box; color: Rgb }
   | { type: "erase"; rect: Box }
+  /** A picture (or signature) stretched to `rect`; `image` keys into the images passed to edit(). */
+  | { type: "image"; rect: Box; image: string }
   /** Swaps an existing line of text for new text in the same style and place. */
   | { type: "replace"; rect: Box; text: string; origin: [number, number]; size: number; color: Rgb; font: FontStyle; underline?: boolean; strike?: boolean };
 
@@ -268,13 +270,62 @@ function applyReplacements(pdf: mupdf.PDFDocument, index: number, replaces: Repl
   }
 }
 
-function applyAnnotations(pdf: mupdf.PDFDocument, index: number, page: mupdf.PDFPage, annotations: Annotation[]) {
+/** Pictures, by id, shared by all pages of one edit (a logo used on every page is stored once). */
+export type ImageStore = Record<string, Uint8Array>;
+
+function drawImages(pdf: mupdf.PDFDocument, index: number, page: mupdf.PDFPage, placed: Extract<Annotation, { type: "image" }>[], images: ImageStore, refs: Map<string, mupdf.PDFObject>) {
+  const pageObj = pdf.findPage(index);
+  let res = pageObj.getInheritable("Resources");
+  if (res.isNull()) {
+    res = pdf.newDictionary();
+    pageObj.put("Resources", res);
+  }
+  let xobjects = res.get("XObject");
+  if (xobjects.isNull()) {
+    xobjects = pdf.newDictionary();
+    res.put("XObject", xobjects);
+  }
+  const map = toUserSpace(page);
+  let ops = "";
+  let n = 0;
+  for (const a of placed) {
+    let ref = refs.get(a.image);
+    if (!ref) {
+      const bytes = images[a.image];
+      if (!bytes) throw new Error("A picture is missing. Add it again.");
+      let img: mupdf.Image;
+      try {
+        img = new mupdf.Image(bytes);
+      } catch {
+        throw new Error("One of the pictures couldn't be read.");
+      }
+      ref = pdf.addImage(img);
+      img.destroy();
+      refs.set(a.image, ref);
+    }
+    let name: string;
+    do name = `EishIm${++n}`;
+    while (!xobjects.get(name).isNull());
+    xobjects.put(name, ref);
+    // The image's unit square: origin at its bottom-left, x to the right, y up (as displayed).
+    const [x0, y0, x1, y1] = normalise(a.rect);
+    const [e, f] = map.point([x0, y1]);
+    const [ia, ib] = map.vector([x1 - x0, 0]);
+    const [ic, id] = map.vector([0, -(y1 - y0)]);
+    ops += `q ${[ia, ib, ic, id, e, f].map((v) => Math.round(v * 1000) / 1000).join(" ")} cm /${name} Do Q\n`;
+  }
+  if (ops) appendContent(pdf, pageObj, ops);
+}
+
+function applyAnnotations(pdf: mupdf.PDFDocument, index: number, page: mupdf.PDFPage, annotations: Annotation[], images: ImageStore = {}, refs = new Map<string, mupdf.PDFObject>()) {
   const erases = annotations.filter((a) => a.type === "erase");
   if (erases.length) {
     for (const a of erases) page.createAnnotation("Redact").setRect(normalise(a.rect));
     // Really removes text, images (pixels) and covered line art under each box.
     page.applyRedactions(false, 2, 1, 0);
   }
+  const placed = annotations.filter((a): a is Extract<Annotation, { type: "image" }> => a.type === "image");
+  if (placed.length) drawImages(pdf, index, page, placed, images, refs);
   const texts = annotations.filter((a): a is Extract<Annotation, { type: "text" }> => a.type === "text" && !!a.text.trim());
   if (texts.length) {
     writeRuns(
@@ -320,7 +371,7 @@ function applyAnnotations(pdf: mupdf.PDFDocument, index: number, page: mupdf.PDF
  * Applies page edits and returns a new, unrestricted PDF. Pages missing from
  * `pages` are deleted; the array order is the new page order.
  */
-export function edit(input: PdfInput, pages: PageEdit[]): Uint8Array {
+export function edit(input: PdfInput, pages: PageEdit[], images: ImageStore = {}): Uint8Array {
   if (pages.length === 0) throw new Error("A PDF needs at least one page.");
   return withPdf(input, (pdf) => {
     const total = pdf.countPages();
@@ -331,6 +382,7 @@ export function edit(input: PdfInput, pages: PageEdit[]): Uint8Array {
       seen.add(p.source);
     }
     let changed = false;
+    const refs = new Map<string, mupdf.PDFObject>();
     for (const p of pages) {
       // Text replacements use the original orientation, so they go first.
       const replaces = p.annotations.filter((a): a is Replace => a.type === "replace");
@@ -347,7 +399,7 @@ export function edit(input: PdfInput, pages: PageEdit[]): Uint8Array {
       if (others.length) {
         const page = pdf.loadPage(p.source);
         try {
-          applyAnnotations(pdf, p.source, page, others);
+          applyAnnotations(pdf, p.source, page, others, images, refs);
         } finally {
           page.destroy();
         }

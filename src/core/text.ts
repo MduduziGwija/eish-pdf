@@ -323,17 +323,30 @@ export function writeRuns(pdf: mupdf.PDFDocument, index: number, runs: TextRun[]
       if (run.strike && !run.invisible) ops += bar(run.size * 0.26);
     }
 
-    // Wrap the old content in q/Q so its graphics state can't leak into ours.
-    const contents = pageObj.get("Contents");
-    const list = pdf.newArray();
-    list.push(pdf.addStream("q\n", {}));
-    if (contents.isArray()) for (let i = 0; i < contents.length; i++) list.push(contents.get(i));
-    else if (!contents.isNull()) list.push(contents);
-    list.push(pdf.addStream(`\nQ\nq\n${ops}Q\n`, {}));
-    pageObj.put("Contents", list);
+    appendContent(pdf, pageObj, ops);
   } finally {
     page.destroy();
   }
+}
+
+/** Adds drawing operators after a page's content, wrapping the old content in q/Q so its graphics state can't leak into ours. */
+export function appendContent(pdf: mupdf.PDFDocument, pageObj: mupdf.PDFObject, ops: string): void {
+  const contents = pageObj.get("Contents");
+  const list = pdf.newArray();
+  list.push(pdf.addStream("q\n", {}));
+  if (contents.isArray()) for (let i = 0; i < contents.length; i++) list.push(contents.get(i));
+  else if (!contents.isNull()) list.push(contents);
+  list.push(pdf.addStream(`\nQ\nq\n${ops}Q\n`, {}));
+  pageObj.put("Contents", list);
+}
+
+/** Page space (points, top-left origin, as displayed) -> PDF user space, for a loaded page. */
+export function toUserSpace(page: mupdf.PDFPage) {
+  const inv = mupdf.Matrix.invert(page.getTransform());
+  return {
+    point: ([x, y]: [number, number]): [number, number] => [inv[0] * x + inv[2] * y + inv[4], inv[1] * x + inv[3] * y + inv[5]],
+    vector: ([x, y]: [number, number]): [number, number] => [inv[0] * x + inv[2] * y, inv[1] * x + inv[3] * y],
+  };
 }
 
 // --- OCR layer -----------------------------------------------------------------

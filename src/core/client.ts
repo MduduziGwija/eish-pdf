@@ -1,5 +1,5 @@
 // Promise-based wrapper around the PDF worker.
-import type { PageEdit, PageSize, PdfInfo, PdfInput, Rotation } from "./pdf";
+import type { ImageStore, PageEdit, PageSize, PdfInfo, PdfInput, Rotation } from "./pdf";
 import type { ErrorKind, Request, Response } from "./protocol";
 import type { OcrWord, TextLine } from "./text";
 import type { ImageOptions } from "./convert";
@@ -59,7 +59,7 @@ export const pdf = {
   unlock: (input: PdfInput) => call<Uint8Array>({ op: "unlock", input }),
   merge: (inputs: PdfInput[]) => call<Uint8Array>({ op: "merge", inputs }),
   split: (input: PdfInput, groups: number[][]) => call<Uint8Array[]>({ op: "split", input, groups }),
-  edit: (input: PdfInput, pages: PageEdit[]) => call<Uint8Array>({ op: "edit", input, pages }),
+  edit: (input: PdfInput, pages: PageEdit[], images: ImageStore = {}) => call<Uint8Array>({ op: "edit", input, pages, images }),
   open: (input: PdfInput) => call<{ session: number; pages: PageSize[] }>({ op: "open", input }),
   render: (session: number, page: number, scale: number, rotate: Rotation = 0) =>
     call<Uint8Array>({ op: "render", session, page, scale, rotate }),

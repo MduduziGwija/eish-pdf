@@ -38,7 +38,7 @@ function handle(req: Request): { result: unknown; transfer?: Transferable[] } {
       return { result: files, transfer: files.map((f) => f.buffer) };
     }
     case "edit": {
-      const bytes = edit(req.input, req.pages);
+      const bytes = edit(req.input, req.pages, req.images);
       return { result: bytes, transfer: [bytes.buffer] };
     }
     case "open": {

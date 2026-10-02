@@ -1,4 +1,4 @@
-import type { PageEdit, PdfInput, Rotation } from "./pdf";
+import type { ImageStore, PageEdit, PdfInput, Rotation } from "./pdf";
 import type { OcrWord } from "./text";
 import type { ImageOptions } from "./convert";
 import type { Slide } from "./slides";
@@ -9,7 +9,7 @@ export type Request =
   | { id: number; op: "unlock"; input: PdfInput }
   | { id: number; op: "merge"; inputs: PdfInput[] }
   | { id: number; op: "split"; input: PdfInput; groups: number[][] }
-  | { id: number; op: "edit"; input: PdfInput; pages: PageEdit[] }
+  | { id: number; op: "edit"; input: PdfInput; pages: PageEdit[]; images: ImageStore }
   // Sessions keep a document open in the worker for fast page rendering.
   | { id: number; op: "open"; input: PdfInput }
   | { id: number; op: "render"; session: number; page: number; scale: number; rotate: Rotation }
