@@ -4,6 +4,8 @@ import type * as mupdf from "mupdf";
 import { edit, inspect, merge, NotPdfError, openPdf, pageSizes, PasswordError, renderPage, split, unlock } from "./pdf";
 import type { Request, Response } from "./protocol";
 import { addOcrLayer, pageHasText, textLines } from "./text";
+import { slidesToPdf } from "./slides";
+import { documentToPdf, htmlToPdf, imagesToPdf, pdfToDocx, pdfToHtml, pdfToImages, pdfToText } from "./convert";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -15,6 +17,8 @@ function session(id: number): mupdf.PDFDocument {
   if (!doc) throw new Error("That document is no longer open.");
   return doc;
 }
+
+const bytesResult = (bytes: Uint8Array) => ({ result: bytes, transfer: [bytes.buffer] });
 
 function handle(req: Request): { result: unknown; transfer?: Transferable[] } {
   switch (req.op) {
@@ -57,6 +61,24 @@ function handle(req: Request): { result: unknown; transfer?: Transferable[] } {
       const bytes = session(req.session).saveToBuffer("garbage,compress,encrypt=none").asUint8Array().slice();
       return { result: bytes, transfer: [bytes.buffer] };
     }
+    case "toPdf":
+      return bytesResult(documentToPdf(req.bytes, req.name));
+    case "htmlToPdf":
+      return bytesResult(htmlToPdf(req.html, req.landscape));
+    case "slidesToPdf":
+      return bytesResult(slidesToPdf(req.slides));
+    case "imagesToPdf":
+      return bytesResult(imagesToPdf(req.images, req.options));
+    case "pdfToText":
+      return { result: pdfToText(req.input) };
+    case "pdfToHtml":
+      return { result: pdfToHtml(req.input) };
+    case "pdfToImages": {
+      const images = pdfToImages(req.input, req.format, req.dpi);
+      return { result: images, transfer: images.map((i) => i.buffer) };
+    }
+    case "pdfToDocx":
+      return bytesResult(pdfToDocx(req.input, req.title));
     case "close":
       sessions.get(req.session)?.destroy();
       sessions.delete(req.session);

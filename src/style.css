@@ -1777,6 +1777,64 @@ body.editor-enlarged {
   }
 }
 
+/* ---------- Convert ---------- */
+.targets {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}
+.kind-flip {
+  position: relative;
+  width: 46px;
+  height: 42px;
+  flex: none;
+  perspective: 300px;
+}
+.kind {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  backface-visibility: hidden;
+  transition: transform 0.6s var(--spring);
+}
+.kind.front {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.kind.back {
+  background: var(--accent);
+  color: var(--accent-ink);
+  transform: rotateY(180deg);
+}
+.file[data-state="done"] .kind.front {
+  transform: rotateY(-180deg);
+}
+.file[data-state="done"] .kind.back {
+  transform: rotateY(0);
+}
+.file[data-state="working"] .kind.front {
+  animation: wiggle-kind 0.5s ease-in-out infinite;
+}
+.file[data-state="error"] .kind.front,
+.file[data-state="password"] .kind.front {
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+.file.converted {
+  animation: celebrate-row 0.8s ease-out;
+}
+@keyframes wiggle-kind {
+  25% {
+    transform: rotate(-8deg) scale(1.05);
+  }
+  75% {
+    transform: rotate(8deg) scale(1.05);
+  }
+}
+
 /* ---------- OCR ---------- */
 .ocr-options {
   display: flex;

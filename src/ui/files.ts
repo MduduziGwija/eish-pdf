@@ -6,6 +6,8 @@ const isPdf = (f: File) => f.type === "application/pdf" || /\.pdf$/i.test(f.name
 
 export interface DropzoneOptions {
   multiple: boolean;
+  /** Which files to take (default: PDFs) and the file-picker filter. */
+  accept?: { test: (f: File) => boolean; picker: string; what: string };
   /** Offer a "choose a folder" button (multi-file tools only). */
   folder?: boolean;
   title: string;
@@ -14,14 +16,15 @@ export interface DropzoneOptions {
 
 /** A drag-and-drop area that also accepts whole folders. */
 export function dropzone(opts: DropzoneOptions): HTMLElement {
-  const fileInput = h("input", { type: "file", accept: "application/pdf,.pdf", multiple: opts.multiple, hidden: true });
+  const accept = opts.accept ?? { test: isPdf, picker: "application/pdf,.pdf", what: "PDF" };
+  const fileInput = h("input", { type: "file", accept: accept.picker, multiple: opts.multiple, hidden: true });
   const folderInput = h("input", { type: "file", multiple: true, hidden: true });
   folderInput.setAttribute("webkitdirectory", "");
 
   const deliver = (files: File[]) => {
-    const pdfs = files.filter(isPdf).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    const pdfs = files.filter(accept.test).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     const skipped = files.length - pdfs.length;
-    if (skipped > 0) toast(`Skipped ${skipped} file${skipped === 1 ? "" : "s"} that ${skipped === 1 ? "isn't a PDF" : "aren't PDFs"}.`);
+    if (skipped > 0) toast(`Skipped ${skipped} file${skipped === 1 ? "" : "s"} that ${skipped === 1 ? `isn't a ${accept.what}` : `aren't ${accept.what}s`}.`);
     if (pdfs.length === 0) return;
     replay(zone, "gulp");
     opts.onFiles(opts.multiple ? pdfs : pdfs.slice(0, 1));

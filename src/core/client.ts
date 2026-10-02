@@ -2,6 +2,8 @@
 import type { PageEdit, PageSize, PdfInfo, PdfInput, Rotation } from "./pdf";
 import type { ErrorKind, Request, Response } from "./protocol";
 import type { OcrWord, TextLine } from "./text";
+import type { ImageOptions } from "./convert";
+import type { Slide } from "./slides";
 
 export class PdfError extends Error {
   constructor(public readonly kind: ErrorKind, message: string) {
@@ -65,4 +67,12 @@ export const pdf = {
   hasText: (session: number, page: number) => call<boolean>({ op: "hasText", session, page }),
   ocrLayer: (session: number, page: number, words: OcrWord[]) => call<null>({ op: "ocrLayer", session, page, words }),
   save: (session: number) => call<Uint8Array>({ op: "save", session }),
+  toPdf: (bytes: Uint8Array, name: string) => call<Uint8Array>({ op: "toPdf", bytes, name }),
+  htmlToPdf: (html: string, landscape = false) => call<Uint8Array>({ op: "htmlToPdf", html, landscape }),
+  slidesToPdf: (slides: Slide[]) => call<Uint8Array>({ op: "slidesToPdf", slides }),
+  imagesToPdf: (images: Uint8Array[], options: ImageOptions) => call<Uint8Array>({ op: "imagesToPdf", images, options }),
+  pdfToText: (input: PdfInput) => call<string>({ op: "pdfToText", input }),
+  pdfToHtml: (input: PdfInput) => call<string>({ op: "pdfToHtml", input }),
+  pdfToImages: (input: PdfInput, format: "png" | "jpg", dpi: number) => call<Uint8Array[]>({ op: "pdfToImages", input, format, dpi }),
+  pdfToDocx: (input: PdfInput, title: string) => call<Uint8Array>({ op: "pdfToDocx", input, title }),
 };
