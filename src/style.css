@@ -246,7 +246,7 @@ a {
 .bubble {
   position: relative;
   max-width: 210px;
-  margin-bottom: 70px;
+  margin-bottom: 84px;
   padding: 10px 14px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -335,6 +335,82 @@ a {
 .m-sweat {
   fill: #6ec6ff;
   opacity: 0;
+}
+/* Bucket hat, a little tilted, with a flag-colour band. */
+.m-hat {
+  transform-origin: 57px 14px;
+  transform: rotate(-7deg);
+  transition: transform 0.3s var(--spring);
+}
+.m-hat-crown {
+  fill: #23262b;
+}
+.m-hat-band {
+  fill: var(--gold);
+}
+.m-hat-stripe {
+  fill: var(--green);
+}
+.m-hat-brim {
+  fill: #2f3238;
+}
+.m-hat-stitch {
+  fill: none;
+  stroke: rgb(255 255 255 / 0.35);
+  stroke-width: 1;
+  stroke-dasharray: 2.5 2.5;
+}
+.m-glasses {
+  fill: rgb(255 255 255 / 0.25);
+  stroke: #1b1b1f;
+  stroke-width: 3;
+  stroke-linecap: round;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.mascot[data-mood="read"] .m-glasses {
+  opacity: 1;
+}
+.mascot[data-mood="read"] .m-smile {
+  opacity: 1;
+}
+.mascot[data-mood="read"] .m-body {
+  animation: nod 1.2s ease-in-out infinite;
+}
+.mascot[data-mood="read"] .m-eyes {
+  animation: scan-eyes 1.2s ease-in-out infinite alternate;
+}
+.mascot[data-mood="happy"] .m-hat {
+  animation: hat-tip 0.9s var(--spring) 2;
+}
+.mascot.poked .m-hat {
+  animation: hat-hop 0.5s var(--spring);
+}
+.mascot[data-mood="eish"] .m-hat {
+  transform: rotate(-16deg) translate(-2px, 3px);
+}
+@keyframes hat-tip {
+  40% {
+    transform: translateY(-16px) rotate(-22deg);
+  }
+}
+@keyframes hat-hop {
+  40% {
+    transform: translateY(-12px) rotate(8deg);
+  }
+}
+@keyframes nod {
+  50% {
+    transform: rotate(3deg) translateY(2px);
+  }
+}
+@keyframes scan-eyes {
+  from {
+    transform: translateX(-3px);
+  }
+  to {
+    transform: translateX(3px);
+  }
 }
 .mascot[data-mood="idle"] .m-smile,
 .mascot[data-mood="nom"] .m-o,
@@ -1401,14 +1477,14 @@ button.thumb:not(:disabled):hover {
   accent-color: var(--accent);
 }
 .stage-wrap {
-  display: grid;
-  place-items: center;
-  padding: 16px;
+  overflow: auto;
+  padding: 12px;
   border-radius: var(--radius);
   background: var(--surface-2);
 }
 .stage {
   position: relative;
+  margin: 0 auto;
   min-width: min(100%, 280px);
   background: #fff;
   border-radius: 4px;
@@ -1442,7 +1518,6 @@ button.thumb:not(:disabled):hover {
   stroke-linejoin: round;
 }
 .ann text {
-  font-family: Helvetica, Arial, sans-serif;
   white-space: pre;
 }
 .ann-highlight rect:not(.ann-hit),
@@ -1499,14 +1574,158 @@ button.thumb:not(:disabled):hover {
   padding: 0 2px;
   border: 1.5px dashed var(--accent);
   border-radius: 3px;
-  background: rgb(255 255 255 / 0.6);
-  font-family: Helvetica, Arial, sans-serif;
+  /* Opaque, so the line being edited doesn't show through. */
+  background: #fff;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.12);
   line-height: 1.16;
   resize: none;
   overflow: hidden;
   white-space: pre;
   outline: none;
 }
+/* ----- Edit text: the PDF's own lines ----- */
+.line-box {
+  fill: transparent;
+  stroke: transparent;
+  pointer-events: none;
+}
+.page-layer[data-tool="retext"] {
+  cursor: default;
+}
+.page-layer[data-tool="retext"] .line-box {
+  pointer-events: all;
+  cursor: text;
+  stroke: color-mix(in srgb, var(--accent) 35%, transparent);
+  stroke-width: 0.6;
+  stroke-dasharray: 3 2;
+}
+.page-layer[data-tool="retext"] .line-box:hover {
+  fill: rgb(0 122 77 / 0.1);
+  stroke: var(--accent);
+}
+.page-layer[data-tool="retext"] .ann-replace {
+  pointer-events: all;
+  cursor: text;
+}
+.ann-replace .cover {
+  fill: #fff;
+}
+
+/* ----- Editor bar, formatting, zoom ----- */
+.editor-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.zoom {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.zoom-label {
+  min-width: 58px;
+  font-variant-numeric: tabular-nums;
+}
+.format-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.fmt-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-right: 6px;
+  border-right: 1px solid var(--border);
+}
+.fmt-group:last-child {
+  border-right: 0;
+}
+.fmt-family {
+  width: auto;
+  max-width: 190px;
+}
+.fmt-size {
+  width: 58px;
+  text-align: center;
+}
+.fmt-btn {
+  display: inline-grid;
+  place-items: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  font-weight: 700;
+  transition: background 0.15s, transform 0.15s var(--spring);
+}
+.fmt-btn svg {
+  width: 18px;
+  height: 18px;
+}
+.fmt-btn:hover {
+  background: var(--surface);
+  transform: translateY(-1px);
+}
+.fmt-btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.fmt-btn.b {
+  font-weight: 900;
+}
+.fmt-btn.i {
+  font-style: italic;
+  font-family: Georgia, serif;
+}
+.fmt-btn.u {
+  text-decoration: underline;
+}
+.fmt-btn.s {
+  text-decoration: line-through;
+}
+.fmt-picker {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+}
+.select {
+  width: auto;
+}
+
+/* ----- Enlarged editor fills the screen ----- */
+body.editor-enlarged {
+  overflow: hidden;
+}
+.page-editor.enlarged {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  padding: 12px;
+  background: var(--bg);
+  animation: rise 0.3s var(--spring);
+}
+.page-editor.enlarged .editor-bar {
+  position: static;
+}
+.page-editor.enlarged .stage-wrap {
+  min-height: 0;
+}
+
 .page-nav {
   display: flex;
   align-items: center;
@@ -1554,6 +1773,67 @@ button.thumb:not(:disabled):hover {
   100% {
     opacity: 0;
     transform: translate(-50%, -50%) rotate(-14deg) scale(1.05);
+  }
+}
+
+/* ---------- OCR ---------- */
+.ocr-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+.option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+.progress {
+  height: 6px;
+  margin-top: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+.progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--green), var(--gold));
+  transition: width 0.3s ease;
+}
+.file-icon.scan {
+  position: relative;
+  overflow: hidden;
+}
+.file[data-state="working"] .file-icon.scan::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+  animation: scan-beam 1.1s ease-in-out infinite alternate;
+}
+@keyframes scan-beam {
+  from {
+    top: 0;
+  }
+  to {
+    top: calc(100% - 3px);
   }
 }
 
@@ -1626,7 +1906,7 @@ button.thumb:not(:disabled):hover {
   .mascot-wrap {
     position: absolute;
     top: 6px;
-    right: 0;
+    right: 8px;
   }
   .mascot {
     width: 84px;

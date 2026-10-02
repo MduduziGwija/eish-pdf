@@ -4,6 +4,7 @@ import { h, icon } from "./ui/dom";
 import { lines, mascot, pick } from "./ui/fun";
 import { editTool } from "./tools/edit";
 import { mergeTool } from "./tools/merge";
+import { ocrTool } from "./tools/ocr";
 import { splitTool } from "./tools/split";
 import { unlockTool } from "./tools/unlock";
 
@@ -14,6 +15,7 @@ const TOOLS = [
   { id: "merge", label: "Merge", icon: icon("merge"), build: mergeTool },
   { id: "split", label: "Split", icon: icon("scissors"), build: splitTool },
   { id: "edit", label: "Edit", icon: h("span.glyph-icon", { "aria-hidden": "true" }, "✎"), build: editTool },
+  { id: "ocr", label: "OCR", icon: h("span.glyph-icon", { "aria-hidden": "true" }, "🔍"), build: ocrTool },
 ] as const;
 type ToolId = (typeof TOOLS)[number]["id"];
 

@@ -1,6 +1,7 @@
 // Promise-based wrapper around the PDF worker.
 import type { PageEdit, PageSize, PdfInfo, PdfInput, Rotation } from "./pdf";
 import type { ErrorKind, Request, Response } from "./protocol";
+import type { OcrWord, TextLine } from "./text";
 
 export class PdfError extends Error {
   constructor(public readonly kind: ErrorKind, message: string) {
@@ -60,4 +61,8 @@ export const pdf = {
   render: (session: number, page: number, scale: number, rotate: Rotation = 0) =>
     call<Uint8Array>({ op: "render", session, page, scale, rotate }),
   close: (session: number) => call<null>({ op: "close", session }),
+  lines: (session: number, page: number) => call<TextLine[]>({ op: "lines", session, page }),
+  hasText: (session: number, page: number) => call<boolean>({ op: "hasText", session, page }),
+  ocrLayer: (session: number, page: number, words: OcrWord[]) => call<null>({ op: "ocrLayer", session, page, words }),
+  save: (session: number) => call<Uint8Array>({ op: "save", session }),
 };

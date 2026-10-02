@@ -12,25 +12,53 @@ export const lines = {
     "Hold on, the kettle's on…",
     "Sharpening the scissors…",
     "Squeezing pages together…",
+    "Sho, give me a sec, mfowethu…",
+    "Working like a taxi on month-end…",
+    "Eish, this one's heavy. Lifting with my knees…",
   ],
-  done: ["Lekker! All done.", "Sharp sharp! ✔", "Sho! That was quick.", "Eish? No more eish.", "Done and dusted, my bru."],
+  done: [
+    "Lekker! All done.",
+    "Sharp sharp! ✔",
+    "Sho mfowethu, done!",
+    "Ayoba!",
+    "Yebo yes! Sorted.",
+    "Kwaai, my bru!",
+    "Shap shap!",
+    "Laduma! ⚽",
+    "Eish? No more eish.",
+  ],
   idle: [
+    "Sho mfowethu! Drop me a PDF.",
     "Howzit! Drop me a PDF.",
+    "Eita! What are we fixing today?",
+    "Heita, my bra! Got PDFs?",
+    "Yebo yes, I'm ready.",
+    "Rocking the bucket hat. Bring the PDFs.",
     "I eat stubborn PDFs for breakfast.",
     "Your files stay on your device. Promise.",
     "No uploads. No funny business.",
     "Locked PDF? Eish. Let's sort it.",
   ],
-  poke: ["Hey! That tickles.", "Eish, careful!", "Ja, ja, I'm awake.", "Sharp!", "Aweh!", "Haibo!"],
-  nom: ["Ooh, PDFs! Drop them!", "Nom nom nom…", "Feed me!"],
+  poke: [
+    "Hey! That tickles.",
+    "Eish, careful!",
+    "Ja, ja, I'm awake.",
+    "Aweh!",
+    "Haibo!",
+    "Eita!",
+    "Sho mfowethu, relax!",
+    "Hayibo, not the bucket hat!",
+    "Mind the hat, my bra.",
+  ],
+  nom: ["Ooh, PDFs! Drop them!", "Nom nom nom…", "Feed me!", "Yebo, more PDFs!"],
 };
 
 export const pick = <T,>(list: T[]): T => list[Math.floor(Math.random() * list.length)];
 
-export type Mood = "idle" | "nom" | "work" | "happy" | "eish";
+export type Mood = "idle" | "nom" | "work" | "happy" | "eish" | "read";
 
 const MASCOT_SVG = `
-<svg class="mascot-svg" viewBox="0 0 120 140" aria-hidden="true">
+<svg class="mascot-svg" viewBox="0 -30 120 170" aria-hidden="true">
   <ellipse class="m-shadow" cx="60" cy="134" rx="34" ry="5"/>
   <g class="m-body">
     <path class="m-page" d="M22 8h54l26 26v86a12 12 0 0 1-12 12H22a12 12 0 0 1-12-12V20A12 12 0 0 1 22 8z"/>
@@ -50,6 +78,18 @@ const MASCOT_SVG = `
     <path class="m-mouth m-flat" d="M47 85q11-6 22 0"/>
     <path class="m-mouth m-grin" d="M44 78h28q-2 14-14 14t-14-14z"/>
     <path class="m-sweat" d="M95 40q5 8 0 12q-5-4 0-12z"/>
+    <g class="m-glasses">
+      <circle cx="42" cy="62" r="12"/>
+      <circle cx="74" cy="62" r="12"/>
+      <path d="M54 61q4-4 8 0M30 60l-12-4M86 60l12-4"/>
+    </g>
+    <g class="m-hat">
+      <path class="m-hat-crown" d="M31 13 37-15q20-9 40 0l6 28z"/>
+      <path class="m-hat-band" d="M33.5 2h47l1.4 6.5H32z"/>
+      <path class="m-hat-stripe" d="M34.6-3h45l1 4h-47z"/>
+      <ellipse class="m-hat-brim" cx="57" cy="14" rx="44" ry="9"/>
+      <ellipse class="m-hat-stitch" cx="57" cy="14.5" rx="37" ry="5.5"/>
+    </g>
   </g>
 </svg>`;
 

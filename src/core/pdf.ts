@@ -2,6 +2,10 @@
 // browser worker and in Node tests.
 import * as mupdf from "mupdf";
 import { range } from "./ranges";
+import { baselineOf } from "./layout";
+
+export { baselineOf, LINE_HEIGHT } from "./layout";
+import { collectFonts, writeRuns, type FontStyle } from "./text";
 
 export { parsePageRanges, range } from "./ranges";
 
@@ -168,16 +172,33 @@ export function split(input: PdfInput, groups: number[][]): Uint8Array[] {
 // --- Editing ----------------------------------------------------------------
 // Annotation coordinates are in points, origin top-left, on the page exactly as
 // it looks *after* the edit's rotation, i.e. what the user saw while editing.
+// The exception is "replace", which edits the page's own text and so always
+// uses the page's original (unrotated) coordinates.
 
 export type Rgb = [number, number, number];
 export type Rotation = 0 | 90 | 180 | 270;
 type Box = [number, number, number, number];
 
 export type Annotation =
-  | { type: "text"; rect: Box; text: string; size: number; color: Rgb }
+  | ({ type: "text"; rect: Box; text: string } & TextStyle)
   | { type: "ink"; strokes: [number, number][][]; width: number; color: Rgb }
   | { type: "highlight"; rect: Box; color: Rgb }
-  | { type: "erase"; rect: Box };
+  | { type: "erase"; rect: Box }
+  /** Swaps an existing line of text for new text in the same style and place. */
+  | { type: "replace"; rect: Box; text: string; origin: [number, number]; size: number; color: Rgb; font: FontStyle; underline?: boolean; strike?: boolean };
+
+/** Word-style formatting for a whole text box. */
+export interface TextStyle {
+  size: number;
+  color: Rgb;
+  family?: FontStyle["family"];
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+  align?: "left" | "center" | "right";
+}
+
 
 export interface PageEdit {
   /** 0-based page in the original file. */
@@ -222,23 +243,62 @@ export function renderPage(pdf: mupdf.PDFDocument, index: number, scale: number,
 
 const normalise = ([x0, y0, x1, y1]: Box): Box => [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
 
-function applyAnnotations(page: mupdf.PDFPage, annotations: Annotation[]) {
+type Replace = Extract<Annotation, { type: "replace" }>;
+
+function applyReplacements(pdf: mupdf.PDFDocument, index: number, replaces: Replace[]) {
+  const page = pdf.loadPage(index);
+  try {
+    // Note the page's fonts before redaction removes the lines that use them.
+    const fonts = collectFonts(page);
+    for (const a of replaces) {
+      // Inset a little so neighbouring lines' ascenders and descenders survive.
+      const [x0, y0, x1, y1] = normalise(a.rect);
+      const inset = (y1 - y0) * 0.12;
+      page.createAnnotation("Redact").setRect([x0, y0 + inset, x1, y1 - inset]);
+    }
+    page.applyRedactions(false, 2, 1, 0);
+    writeRuns(
+      pdf,
+      index,
+      replaces.filter((a) => a.text.trim()).map((a) => ({ text: a.text, origin: a.origin, size: a.size, color: a.color, font: a.font, underline: a.underline, strike: a.strike })),
+      fonts,
+    );
+  } finally {
+    page.destroy();
+  }
+}
+
+function applyAnnotations(pdf: mupdf.PDFDocument, index: number, page: mupdf.PDFPage, annotations: Annotation[]) {
   const erases = annotations.filter((a) => a.type === "erase");
   if (erases.length) {
     for (const a of erases) page.createAnnotation("Redact").setRect(normalise(a.rect));
     // Really removes text, images (pixels) and covered line art under each box.
     page.applyRedactions(false, 2, 1, 0);
   }
+  const texts = annotations.filter((a): a is Extract<Annotation, { type: "text" }> => a.type === "text" && !!a.text.trim());
+  if (texts.length) {
+    writeRuns(
+      pdf,
+      index,
+      texts.flatMap((a) => {
+        const [x0, y0, x1] = normalise(a.rect);
+        const font: FontStyle = { name: "", family: a.family ?? "sans", bold: !!a.bold, italic: !!a.italic };
+        return a.text.split("\n").map((line, i) => ({
+          text: line,
+          origin: [x0 + 2, baselineOf(y0, a.size, i)] as [number, number],
+          size: a.size,
+          color: a.color,
+          font,
+          underline: a.underline,
+          strike: a.strike,
+          align: a.align,
+          boxWidth: x1 - x0 - 4,
+        }));
+      }),
+    );
+  }
   for (const a of annotations) {
-    if (a.type === "text") {
-      if (!a.text.trim()) continue;
-      const annot = page.createAnnotation("FreeText");
-      annot.setRect(normalise(a.rect));
-      annot.setContents(a.text);
-      annot.setDefaultAppearance("Helv", a.size, a.color);
-      annot.setBorderWidth(0);
-      annot.update();
-    } else if (a.type === "ink") {
+    if (a.type === "ink") {
       if (a.strokes.length === 0) continue;
       const annot = page.createAnnotation("Ink");
       annot.setInkList(a.strokes);
@@ -272,7 +332,11 @@ export function edit(input: PdfInput, pages: PageEdit[]): Uint8Array {
     }
     let changed = false;
     for (const p of pages) {
-      // Rotate first: annotations are positioned on the rotated page, and
+      // Text replacements use the original orientation, so they go first.
+      const replaces = p.annotations.filter((a): a is Replace => a.type === "replace");
+      const others = p.annotations.filter((a) => a.type !== "replace");
+      if (replaces.length) applyReplacements(pdf, p.source, replaces);
+      // Then rotate: other annotations are positioned on the rotated page, and
       // MuPDF keeps added text upright on rotated pages.
       if (p.rotate) {
         const obj = pdf.findPage(p.source);
@@ -280,10 +344,10 @@ export function edit(input: PdfInput, pages: PageEdit[]): Uint8Array {
         const base = current.isNumber() ? current.asNumber() : 0;
         obj.put("Rotate", (((base + p.rotate) % 360) + 360) % 360);
       }
-      if (p.annotations.length) {
+      if (others.length) {
         const page = pdf.loadPage(p.source);
         try {
-          applyAnnotations(page, p.annotations);
+          applyAnnotations(pdf, p.source, page, others);
         } finally {
           page.destroy();
         }

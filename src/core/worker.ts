@@ -3,11 +3,18 @@
 import type * as mupdf from "mupdf";
 import { edit, inspect, merge, NotPdfError, openPdf, pageSizes, PasswordError, renderPage, split, unlock } from "./pdf";
 import type { Request, Response } from "./protocol";
+import { addOcrLayer, pageHasText, textLines } from "./text";
 
 declare const self: DedicatedWorkerGlobalScope;
 
 const sessions = new Map<number, mupdf.PDFDocument>();
 let nextSession = 1;
+
+function session(id: number): mupdf.PDFDocument {
+  const doc = sessions.get(id);
+  if (!doc) throw new Error("That document is no longer open.");
+  return doc;
+}
 
 function handle(req: Request): { result: unknown; transfer?: Transferable[] } {
   switch (req.op) {
@@ -36,10 +43,19 @@ function handle(req: Request): { result: unknown; transfer?: Transferable[] } {
       return { result: { session, pages: pageSizes(doc) } };
     }
     case "render": {
-      const doc = sessions.get(req.session);
-      if (!doc) throw new Error("That document is no longer open.");
-      const png = renderPage(doc, req.page, req.scale, req.rotate);
+      const png = renderPage(session(req.session), req.page, req.scale, req.rotate);
       return { result: png, transfer: [png.buffer] };
+    }
+    case "lines":
+      return { result: textLines(session(req.session), req.page) };
+    case "hasText":
+      return { result: pageHasText(session(req.session), req.page) };
+    case "ocrLayer":
+      addOcrLayer(session(req.session), req.page, req.words);
+      return { result: null };
+    case "save": {
+      const bytes = session(req.session).saveToBuffer("garbage,compress,encrypt=none").asUint8Array().slice();
+      return { result: bytes, transfer: [bytes.buffer] };
     }
     case "close":
       sessions.get(req.session)?.destroy();

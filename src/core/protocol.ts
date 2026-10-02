@@ -1,4 +1,5 @@
 import type { PageEdit, PdfInput, Rotation } from "./pdf";
+import type { OcrWord } from "./text";
 
 export type Request =
   | { id: number; op: "inspect"; input: PdfInput }
@@ -9,7 +10,11 @@ export type Request =
   // Sessions keep a document open in the worker for fast page rendering.
   | { id: number; op: "open"; input: PdfInput }
   | { id: number; op: "render"; session: number; page: number; scale: number; rotate: Rotation }
-  | { id: number; op: "close"; session: number };
+  | { id: number; op: "close"; session: number }
+  | { id: number; op: "lines"; session: number; page: number }
+  | { id: number; op: "hasText"; session: number; page: number }
+  | { id: number; op: "ocrLayer"; session: number; page: number; words: OcrWord[] }
+  | { id: number; op: "save"; session: number };
 
 export type ErrorKind = "password" | "not-pdf" | "error";
 
