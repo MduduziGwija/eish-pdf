@@ -1444,6 +1444,15 @@ button.thumb:not(:disabled):hover {
   gap: 12px;
   min-height: 34px;
 }
+.scan-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+.scan-tools[hidden] {
+  display: none;
+}
 .tool-hint {
   color: var(--muted);
   font-size: 0.85rem;

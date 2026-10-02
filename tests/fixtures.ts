@@ -83,14 +83,14 @@ export function styledLines(bytes: Uint8Array) {
 }
 
 /** A "scanned" PDF: each page is just a picture of the original page, no text. */
-export function makeScannedPdf(source: Uint8Array, dpi = 200): Uint8Array {
+export function makeScannedPdf(source: Uint8Array, dpi = 200, jpeg = false): Uint8Array {
   const src = new mupdf.PDFDocument(source);
   const out = new mupdf.PDFDocument();
   for (let i = 0; i < src.countPages(); i++) {
     const page = src.loadPage(i);
     const [, , w, h] = page.getBounds();
     const pix = page.toPixmap(mupdf.Matrix.scale(dpi / 72, dpi / 72), mupdf.ColorSpace.DeviceGray, false, true);
-    const image = out.addImage(new mupdf.Image(pix));
+    const image = out.addImage(jpeg ? new mupdf.Image(pix.asJPEG(80)) : new mupdf.Image(pix));
     const res = out.addObject({ XObject: { Im0: image } });
     out.insertPage(-1, out.addPage([0, 0, w, h], 0, res, `q ${w} 0 0 ${h} 0 0 cm /Im0 Do Q`));
   }

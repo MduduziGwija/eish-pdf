@@ -4,6 +4,7 @@ import type * as mupdf from "mupdf";
 import { edit, inspect, merge, NotPdfError, openPdf, pageSizes, PasswordError, renderPage, split, unlock } from "./pdf";
 import type { Request, Response } from "./protocol";
 import { addOcrLayer, pageHasText, textLines } from "./text";
+import { scanImage } from "./scanimage";
 import { slidesToPdf } from "./slides";
 import { documentToPdf, htmlToPdf, imagesToPdf, pdfLines, pdfToDocx, pdfToHtml, pdfToImages, pdfToText } from "./convert";
 import { compareDocs } from "./compare";
@@ -54,6 +55,10 @@ function handle(req: Request): { result: unknown; transfer?: Transferable[] } {
     }
     case "lines":
       return { result: textLines(session(req.session), req.page) };
+    case "scanImage": {
+      const found = scanImage(session(req.session), req.page);
+      return { result: found, transfer: found ? [found.png.buffer] : [] };
+    }
     case "hasText":
       return { result: pageHasText(session(req.session), req.page) };
     case "ocrLayer":

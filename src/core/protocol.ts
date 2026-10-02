@@ -17,6 +17,7 @@ export type Request =
   | { id: number; op: "close"; session: number }
   | { id: number; op: "lines"; session: number; page: number }
   | { id: number; op: "hasText"; session: number; page: number }
+  | { id: number; op: "scanImage"; session: number; page: number }
   | { id: number; op: "ocrLayer"; session: number; page: number; words: OcrWord[] }
   | { id: number; op: "save"; session: number }
   | { id: number; op: "toPdf"; bytes: Uint8Array; name: string }

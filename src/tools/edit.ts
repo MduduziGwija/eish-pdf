@@ -2,7 +2,8 @@ import { pdf, PdfError } from "../core/client";
 import { baselineOf, LINE_HEIGHT } from "../core/layout";
 import type { Annotation, PageEdit, PageSize, Rgb, Rotation } from "../core/pdf";
 import type { OcrWord, TextLine } from "../core/text";
-import { linesFromBlocks, type TesseractBlock } from "../core/ocrwords";
+import { linesFromBlocks, type OcrLetter, type TesseractBlock } from "../core/ocrwords";
+import type { ScanLine, ScanPicture } from "../scan/look";
 import { LANGUAGES, startOcr, type OcrEngine, type OcrLanguage } from "../ocr/engine";
 import { h, icon, reducedMotion, sleep, svg } from "../ui/dom";
 import { baseName, dropzone, formatSize, plural, readBytes, saveFile } from "../ui/files";
@@ -19,7 +20,7 @@ type Box = [number, number, number, number];
 type TextAnn = Extract<Annotation, { type: "text" }>;
 type ReplaceAnn = Extract<Annotation, { type: "replace" }>;
 /** A line of the page's text; lines read from a scan also carry the paper colour. */
-type EditLine = TextLine & { background?: Rgb; scanned?: boolean };
+type EditLine = TextLine & { background?: Rgb; scanned?: boolean; words?: OcrWord[]; letters?: OcrLetter[] };
 
 interface Doc {
   file: File;
@@ -72,6 +73,15 @@ export function editTool(): HTMLElement {
   let ocrEngine: Promise<OcrEngine> | undefined;
   const scannedSources = new Set<number>();
   let scanLanguage: OcrLanguage = "eng";
+  // Scanned lines are redrawn in the scan's own look (font, blur, grain), unless turned off.
+  let matchScan = true;
+  const scanRenders = new Map<number, { png: Uint8Array; scale: number }>();
+  const scanPictures = new Map<number, Promise<ScanPicture>>();
+  try {
+    matchScan = localStorage.getItem("eish-scan-look") !== "off";
+  } catch {
+    // Storage blocked: keep the default.
+  }
   try {
     const saved = localStorage.getItem("eish-scan-language");
     if (LANGUAGES.some((l) => l.id === saved)) scanLanguage = saved as OcrLanguage;
@@ -183,6 +193,7 @@ export function editTool(): HTMLElement {
       const colours = await sampleColours(png, found.map((l) => l.bbox), scale);
       if (doc?.session !== session) return [];
       scanWords.set(source, found.flatMap((l) => l.words));
+      scanRenders.set(source, { png, scale });
       mascot.flash("happy", found.length ? `Sho! I read ${plural(found.length, "line")}. Click one to change it.` : "Eish, I couldn't find any text on this page.", 3200);
       return found.map((l, i) => ({
         text: l.text,
@@ -193,6 +204,8 @@ export function editTool(): HTMLElement {
         background: colours[i].paper,
         font: { name: "", family: "sans", bold: false, italic: false },
         scanned: true,
+        words: l.words,
+        letters: l.letters,
       }));
     } catch (err) {
       ocrEngine = undefined;
@@ -225,8 +238,52 @@ export function editTool(): HTMLElement {
       scannedSources.clear();
       render();
     });
-    const picker = h("label.option.scan-language", { hidden: !scannedSources.has(source) }, h("span", {}, "Scan language"), select);
-    return picker;
+    const match = h("input", { type: "checkbox", checked: matchScan });
+    match.addEventListener("change", () => {
+      matchScan = match.checked;
+      try {
+        localStorage.setItem("eish-scan-look", matchScan ? "on" : "off");
+      } catch {
+        // Not remembered, that's fine.
+      }
+      mascot.flash("happy", matchScan ? "Sho! New words will look scanned too." : "Okay, crisp clean text it is.", 2200);
+    });
+    return h(
+      "div.scan-tools.scan-language",
+      { hidden: !scannedSources.has(source) },
+      h("label.option", {}, h("span", {}, "Scan language"), select),
+      h("label.check", { title: "Redraws your words in the scan's own font, size, blur, grain and ink, reusing the scan's own letters where it can" }, match, h("span", {}, "Match the scan's look")),
+    );
+  }
+
+  /** The page's scan pixels (its own picture if it's a plain scan, else the page as read). */
+  function pictureOf(source: number): Promise<ScanPicture> {
+    let found = scanPictures.get(source);
+    if (!found) {
+      const session = doc!.session;
+      found = (async () => {
+        const { ScanPicture } = await import("../scan/look");
+        const own = await pdf.scanImage(session, source);
+        // Very large scans would use a lot of memory: work from the page as read instead.
+        if (own && own.width * own.height <= 40e6) return ScanPicture.fromPng(own.png, own.matrix, true);
+        const read = scanRenders.get(source);
+        if (!read) throw new Error("This page hasn't been read yet.");
+        return ScanPicture.fromPng(read.png, [1 / read.scale, 0, 0, 1 / read.scale, 0, 0], false);
+      })();
+      found.catch(() => scanPictures.delete(source));
+      scanPictures.set(source, found);
+    }
+    return found;
+  }
+
+  const scanLineOf = (line: EditLine): ScanLine => ({ text: line.text, bbox: line.bbox, origin: line.origin, size: line.size, words: line.words ?? [], letters: line.letters ?? [] });
+
+  /** Works out how a scanned line looks (in the background; cached). */
+  async function lookOf(source: number, line: EditLine) {
+    const picture = await pictureOf(source);
+    const all = await linesOf(source);
+    const others = all.filter((l) => l !== line && l.scanned && Math.abs(l.size - line.size) / line.size < 0.12).map(scanLineOf);
+    return { picture, look: await picture.look(scanLineOf(line), others) };
   }
 
   /** Shows "reading…" progress on the page being edited, if it's this one. */
@@ -375,6 +432,16 @@ export function editTool(): HTMLElement {
         const im = document.createElementNS(SVG_NS, "image");
         const [x0, y0, x1, y1] = a.rect;
         im.setAttribute("href", pictures.get(a.image)?.url ?? "");
+        im.setAttribute("x", String(x0));
+        im.setAttribute("y", String(y0));
+        im.setAttribute("width", String(x1 - x0));
+        im.setAttribute("height", String(y1 - y0));
+        im.setAttribute("preserveAspectRatio", "none");
+        g.append(im);
+      } else if (a.type === "replace" && a.scan) {
+        const im = document.createElementNS(SVG_NS, "image");
+        const [x0, y0, x1, y1] = a.scan.box;
+        im.setAttribute("href", pictures.get(a.scan.patch)?.url ?? "");
         im.setAttribute("x", String(x0));
         im.setAttribute("y", String(y0));
         im.setAttribute("width", String(x1 - x0));
@@ -671,7 +738,7 @@ export function editTool(): HTMLElement {
           if (!stage.isConnected) return;
           const hint = options.querySelector(".tool-hint")!;
           if (lines.length === 0) hint.textContent = "No text found on this page, even after reading it.";
-          else if (lines.some((l) => l.scanned)) hint.textContent = "Scanned page: click a line to change it. The new text matches its size, ink and paper colour.";
+          else if (lines.some((l) => l.scanned)) hint.textContent = "Scanned page: click a line to change it. With “Match the scan’s look” on, your words get the scan’s own font, blur and grain.";
           lines.forEach((line, k) => {
             const r = rect(line.bbox, "line-box");
             r.dataset.line = String(k);
@@ -975,6 +1042,9 @@ export function editTool(): HTMLElement {
     const prev = existing !== undefined ? (p.annotations[existing] as ReplaceAnn) : undefined;
     const detected: Fmt = { ...DEFAULT_FMT, family: line.font.family, bold: line.font.bold, italic: line.font.italic, size: line.size, color: line.color };
     const f: Fmt = prev ? { ...detected, family: prev.font.family, bold: prev.font.bold, italic: prev.font.italic, size: prev.size, color: prev.color, underline: !!prev.underline, strike: !!prev.strike } : detected;
+    // Scanned lines: start working out the scan's look while the person types.
+    const scanLook = line.scanned && matchScan ? lookOf(p.source, line) : undefined;
+    scanLook?.catch(() => undefined);
     // The box sits where the line's text starts, at the line's top.
     openBox(
       stage,
@@ -987,22 +1057,25 @@ export function editTool(): HTMLElement {
         if (unchanged && existing === undefined) return;
         // Keep the document's own font unless the family or weight was changed.
         const sameFace = f.family === line.font.family && f.bold === line.font.bold && f.italic === line.font.italic;
+        const plain: ReplaceAnn = {
+          type: "replace",
+          rect: line.bbox,
+          text,
+          origin: line.origin,
+          size: f.size,
+          color: f.color,
+          font: { name: sameFace ? line.font.name : "", family: f.family, bold: f.bold, italic: f.italic },
+          underline: f.underline,
+          strike: f.strike,
+          ...(line.background ? { background: line.background } : {}),
+        };
+        if (scanLook && !unchanged) {
+          void redrawScanned(p, line, plain, f, detected, scanLook);
+          return;
+        }
         commit(() => {
           if (existing !== undefined) p.annotations.splice(existing, 1);
-          if (!unchanged) {
-            p.annotations.push({
-              type: "replace",
-              rect: line.bbox,
-              text,
-              origin: line.origin,
-              size: f.size,
-              color: f.color,
-              font: { name: sameFace ? line.font.name : "", family: f.family, bold: f.bold, italic: f.italic },
-              underline: f.underline,
-              strike: f.strike,
-              ...(line.background ? { background: line.background } : {}),
-            });
-          }
+          if (!unchanged) p.annotations.push(plain);
         });
         if (!unchanged) mascot.flash("happy", pick(["Sho! Nobody will know.", "Smooth, mfowethu.", "Same font, new words. Kwaai!"]), 1800);
       },
@@ -1010,11 +1083,57 @@ export function editTool(): HTMLElement {
     );
   }
 
+  /** Redraws a scanned line in the scan's own look and puts it in place of the old one. */
+  async function redrawScanned(p: PageEdit, line: EditLine, plain: ReplaceAnn, f: Fmt, detected: Fmt, scanLook: ReturnType<typeof lookOf>) {
+    const place = (a: ReplaceAnn) =>
+      commit(() => {
+        const at = p.annotations.findIndex((x) => x.type === "replace" && sameBox(x.rect, line.bbox));
+        if (at >= 0) p.annotations.splice(at, 1);
+        p.annotations.push(a);
+      });
+    mascot.mood("work");
+    mascot.say("Matching the scan's font, blur and grain…");
+    try {
+      const { picture, look } = await scanLook;
+      const faceChanged = f.family !== detected.family || f.bold !== detected.bold || f.italic !== detected.italic;
+      const painted = await picture.paint(scanLineOf(line), look, plain.text, {
+        sizeScale: f.size / detected.size,
+        color: f.color.every((v, i) => Math.abs(v - detected.color[i]) < 0.01) ? undefined : f.color,
+        style: faceChanged ? { generic: f.family, bold: f.bold, italic: f.italic } : undefined,
+        underline: f.underline,
+        strike: f.strike,
+      });
+      if (!pages.includes(p)) return;
+      const id = `scan-${++pictureCount}`;
+      pictures.set(id, { png: painted.png, url: URL.createObjectURL(new Blob([painted.png as BlobPart], { type: "image/png" })) });
+      place({
+        ...plain,
+        scan: {
+          patch: id,
+          box: painted.box,
+          ...(picture.inPlace ? { at: [painted.x, painted.y] as [number, number], scanSize: [picture.width, picture.height] as [number, number] } : {}),
+          words: painted.words,
+        },
+      });
+      const reused = [...plain.text].filter((c) => look.glyphs.has(c)).length;
+      mascot.flash("happy", `Sho! Matched the scan: ${look.face.family.label} look${reused && !faceChanged ? `, ${plural(reused, "letter")} straight from the scan` : ""}.`, 3200);
+    } catch {
+      if (!pages.includes(p)) return;
+      place(plain);
+      mascot.flash("eish", "Eish, I couldn't match the scan's look here, so I used clean text.", 3000);
+    }
+  }
+
   // --- Pictures and signatures -----------------------------------------------
 
   function usedPictures(): Record<string, Uint8Array> {
     const out: Record<string, Uint8Array> = {};
-    for (const p of pages) for (const a of p.annotations) if (a.type === "image") out[a.image] = pictures.get(a.image)!.png;
+    for (const p of pages) {
+      for (const a of p.annotations) {
+        if (a.type === "image") out[a.image] = pictures.get(a.image)!.png;
+        else if (a.type === "replace" && a.scan) out[a.scan.patch] = pictures.get(a.scan.patch)!.png;
+      }
+    }
     return out;
   }
 
@@ -1134,6 +1253,8 @@ export function editTool(): HTMLElement {
     ocrEngine = undefined;
     scanWords.clear();
     scannedSources.clear();
+    scanRenders.clear();
+    scanPictures.clear();
     closeActive(false);
     if (doc) closeSession(doc.session);
     doc = undefined;

@@ -12,7 +12,7 @@ interface Bbox {
 export interface TesseractLine {
   bbox: Bbox;
   baseline: Bbox;
-  words: { text: string; bbox: Bbox; confidence: number }[];
+  words: { text: string; bbox: Bbox; confidence: number; symbols?: { text: string; bbox: Bbox; confidence: number }[] }[];
 }
 
 export interface TesseractBlock {
@@ -56,7 +56,18 @@ export interface OcrLine {
   /** Estimated font size in points. */
   size: number;
   words: OcrWord[];
+  /** Single letters Tesseract was sure of, so they can be reused when redrawing the line. */
+  letters: OcrLetter[];
 }
+
+export interface OcrLetter {
+  text: string;
+  bbox: [number, number, number, number];
+  confidence: number;
+}
+
+/** Letters below this confidence aren't reused. */
+const MIN_LETTER_CONFIDENCE = 80;
 
 /** Groups OCR words into lines, with a font size estimated from the letter heights. */
 export function linesFromBlocks(blocks: TesseractBlock[] | null | undefined, scale: number): OcrLine[] {
@@ -74,7 +85,12 @@ export function linesFromBlocks(blocks: TesseractBlock[] | null | undefined, sca
         // Capitals and tall letters rise about 0.72 of the font size above the baseline.
         const ascent = Math.max(...words.map((w) => w.baseline - w.bbox[1]));
         const size = Math.max(4, Math.round((ascent / 0.72) * 2) / 2);
-        lines.push({ text: words.map((w) => w.text).join(" "), bbox: [x0, y0, x1, y1], origin: [x0, baseline], size, words });
+        const letters: OcrLetter[] = line.words
+          .filter((w) => w.confidence >= MIN_CONFIDENCE)
+          .flatMap((w) => w.symbols ?? [])
+          .filter((l) => l.confidence >= MIN_LETTER_CONFIDENCE && l.text.trim().length === 1)
+          .map((l) => ({ text: l.text, confidence: l.confidence, bbox: [l.bbox.x0 / scale, l.bbox.y0 / scale, l.bbox.x1 / scale, l.bbox.y1 / scale] }));
+        lines.push({ text: words.map((w) => w.text).join(" "), bbox: [x0, y0, x1, y1], origin: [x0, baseline], size, words, letters });
       }
     }
   }

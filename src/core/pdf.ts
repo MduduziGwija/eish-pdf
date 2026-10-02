@@ -8,6 +8,7 @@ export { baselineOf, LINE_HEIGHT } from "./layout";
 import { addOcrLayer, appendContent, collectFonts, toUserSpace, writeRuns, type FontStyle, type OcrWord } from "./text";
 
 export { parsePageRanges, range } from "./ranges";
+import { writeScanPatches, type ScanPatch } from "./scanimage";
 
 export type FileStatus = "unrestricted" | "restricted" | "password";
 
@@ -199,7 +200,23 @@ export type Annotation =
       strike?: boolean;
       /** Paper colour to paint over the old text (scanned pages); none = leave blank. */
       background?: Rgb;
+      /** Redrawn to look scanned: these edited pixels replace the old ones instead of text being drawn. */
+      scan?: ScanEdit;
     };
+
+/** A line of a scan, redrawn in the scan's own look (see src/scan). */
+export interface ScanEdit {
+  /** PNG with alpha (transparent = unchanged), keyed into the images passed to edit(). */
+  patch: string;
+  /** Where the patch goes on the page (original page coordinates). */
+  box: Box;
+  /** Top-left pixel in the page's scan picture, when the patch was made from that picture's own pixels. */
+  at?: [number, number];
+  /** Size of that scan picture, in pixels. */
+  scanSize?: [number, number];
+  /** The new words, saved as invisible text so the page stays searchable. */
+  words: OcrWord[];
+}
 
 /** Word-style formatting for a whole text box. */
 export interface TextStyle {
@@ -261,7 +278,29 @@ const normalise = ([x0, y0, x1, y1]: Box): Box => [Math.min(x0, x1), Math.min(y0
 
 type Replace = Extract<Annotation, { type: "replace" }>;
 
-function applyReplacements(pdf: mupdf.PDFDocument, index: number, replaces: Replace[]) {
+/** Width and height from a PNG's header. */
+function pngSize(png: Uint8Array): [number, number] {
+  const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
+  return [view.getUint32(16), view.getUint32(20)];
+}
+
+function applyReplacements(pdf: mupdf.PDFDocument, index: number, all: Replace[], images: ImageStore, refs: Map<string, mupdf.PDFObject>) {
+  // Lines redrawn in the scan's look: paint them into the scan picture itself.
+  let overlays = all.filter((a) => a.scan);
+  const inPlace = overlays.filter((a) => a.scan!.at && a.scan!.scanSize);
+  if (inPlace.length) {
+    const size = inPlace[0].scan!.scanSize!;
+    const patches: ScanPatch[] = inPlace.map((a) => {
+      const png = images[a.scan!.patch];
+      if (!png) throw new Error("A scan edit is missing. Make it again.");
+      const [width, height] = pngSize(png);
+      return { x: a.scan!.at![0], y: a.scan!.at![1], width, height, png };
+    });
+    if (writeScanPatches(pdf, index, size, patches)) overlays = overlays.filter((a) => !inPlace.includes(a));
+  }
+  // Otherwise the old text is removed and the redrawn piece goes on top.
+  const replaces = all.filter((a) => !a.scan || overlays.includes(a));
+  if (replaces.length === 0) return;
   const page = pdf.loadPage(index);
   try {
     // Note the page's fonts before redaction removes the lines that use them.
@@ -274,7 +313,7 @@ function applyReplacements(pdf: mupdf.PDFDocument, index: number, replaces: Repl
     }
     page.applyRedactions(false, 2, 1, 0);
     // On scans, paint the removed area in the paper's colour so it blends in.
-    const patches = replaces.filter((a) => a.background);
+    const patches = replaces.filter((a) => a.background && !a.scan);
     if (patches.length) {
       const map = toUserSpace(page);
       let ops = "";
@@ -288,10 +327,13 @@ function applyReplacements(pdf: mupdf.PDFDocument, index: number, replaces: Repl
       }
       appendContent(pdf, pdf.findPage(index), ops);
     }
+    if (overlays.length) {
+      drawImages(pdf, index, page, overlays.map((a) => ({ type: "image", rect: a.scan!.box, image: a.scan!.patch })), images, refs);
+    }
     writeRuns(
       pdf,
       index,
-      replaces.filter((a) => a.text.trim()).map((a) => ({ text: a.text, origin: a.origin, size: a.size, color: a.color, font: a.font, underline: a.underline, strike: a.strike })),
+      replaces.filter((a) => !a.scan && a.text.trim()).map((a) => ({ text: a.text, origin: a.origin, size: a.size, color: a.color, font: a.font, underline: a.underline, strike: a.strike })),
       fonts,
     );
   } finally {
@@ -416,12 +458,12 @@ export function edit(input: PdfInput, pages: PageEdit[], images: ImageStore = {}
       // Text replacements use the original orientation, so they go first.
       const replaces = p.annotations.filter((a): a is Replace => a.type === "replace");
       const others = p.annotations.filter((a) => a.type !== "replace");
-      if (replaces.length) applyReplacements(pdf, p.source, replaces);
-      // OCR'd words become invisible, searchable text, except where text was replaced.
-      if (p.ocr?.length) {
-        const overlaps = (w: OcrWord) => replaces.some((r) => w.bbox[0] < r.rect[2] && w.bbox[2] > r.rect[0] && w.bbox[1] < r.rect[3] && w.bbox[3] > r.rect[1]);
-        addOcrLayer(pdf, p.source, p.ocr.filter((w) => !overlaps(w)));
-      }
+      if (replaces.length) applyReplacements(pdf, p.source, replaces, images, refs);
+      // OCR'd words become invisible, searchable text, except where text was replaced
+      // (lines redrawn in the scan's look bring their new words along).
+      const overlaps = (w: OcrWord) => replaces.some((r) => w.bbox[0] < r.rect[2] && w.bbox[2] > r.rect[0] && w.bbox[1] < r.rect[3] && w.bbox[3] > r.rect[1]);
+      const words = [...(p.ocr ?? []).filter((w) => !overlaps(w)), ...replaces.flatMap((r) => r.scan?.words ?? [])];
+      if (words.length) addOcrLayer(pdf, p.source, words);
       // Then rotate: other annotations are positioned on the rotated page, and
       // MuPDF keeps added text upright on rotated pages.
       if (p.rotate) {

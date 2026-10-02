@@ -6,6 +6,7 @@ import type { ImageOptions } from "./convert";
 import type { Slide } from "./slides";
 import type { Comparison, CompareOptions, DocText } from "./compare";
 import type { PreparedPdf, SignatureInfo } from "./signing";
+import type { ScanImage } from "./scanimage";
 
 export class PdfError extends Error {
   constructor(public readonly kind: ErrorKind, message: string) {
@@ -66,6 +67,8 @@ export const pdf = {
     call<Uint8Array>({ op: "render", session, page, scale, rotate }),
   close: (session: number) => call<null>({ op: "close", session }),
   lines: (session: number, page: number) => call<TextLine[]>({ op: "lines", session, page }),
+  /** The page's scan picture and where its pixels sit, or null if it isn't a simple scan. */
+  scanImage: (session: number, page: number) => call<ScanImage | null>({ op: "scanImage", session, page }),
   hasText: (session: number, page: number) => call<boolean>({ op: "hasText", session, page }),
   ocrLayer: (session: number, page: number, words: OcrWord[]) => call<null>({ op: "ocrLayer", session, page, words }),
   save: (session: number) => call<Uint8Array>({ op: "save", session }),
