@@ -41,6 +41,8 @@ export interface TextRun {
   /** Align within `boxWidth` points, measured from `origin`. */
   align?: "left" | "center" | "right";
   boxWidth?: number;
+  /** Direction the text runs, in radians clockwise from "to the right" (page space, y down). */
+  angle?: number;
 }
 
 // --- Reading -----------------------------------------------------------------
@@ -306,8 +308,9 @@ export function writeRuns(pdf: mupdf.PDFDocument, index: number, runs: TextRun[]
     let ops = "";
     for (const run of usable) {
       const enc = book.encode(run.text, run.size, run.font);
-      const [a, b] = vec([1, 0]);
-      const [c, d] = vec([0, -1]);
+      const phi = run.angle ?? 0;
+      const [a, b] = vec([Math.cos(phi), Math.sin(phi)]);
+      const [c, d] = vec([Math.sin(phi), -Math.cos(phi)]);
       const shown = run.width && enc.width > 0 ? run.width : enc.width;
       const shift = run.boxWidth && run.align && run.align !== "left" ? (run.boxWidth - shown) * (run.align === "center" ? 0.5 : 1) : 0;
       const [e, f] = pt([run.origin[0] + Math.max(0, shift), run.origin[1]]);
@@ -359,6 +362,8 @@ export interface OcrWord {
   baseline: number;
   /** How sure OCR was (0–100), when known. */
   confidence?: number;
+  /** For words that aren't level (tilted or turned lines): where the baseline starts, how long it is, the letter height and the direction (radians, clockwise from "right"). `bbox` is then just their outline. */
+  tilt?: { origin: [number, number]; length: number; height: number; angle: number };
 }
 
 /** Adds OCR'd words as invisible, searchable text sized to cover each word. */
@@ -369,6 +374,7 @@ export function addOcrLayer(pdf: mupdf.PDFDocument, index: number, words: OcrWor
     words
       .filter((w) => w.text.trim())
       .map((w) => {
+        if (w.tilt) return { text: w.text.trim(), origin: w.tilt.origin, size: Math.max(1, w.tilt.height * 0.85), width: w.tilt.length, angle: w.tilt.angle, invisible: true };
         const height = w.bbox[3] - w.bbox[1];
         return {
           text: w.text.trim(),

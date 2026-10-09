@@ -2,8 +2,10 @@ import { pdf, PdfError } from "../core/client";
 import { baselineOf, LINE_HEIGHT } from "../core/layout";
 import type { Annotation, PageEdit, PageSize, Rgb, Rotation } from "../core/pdf";
 import type { OcrWord, TextLine } from "../core/text";
-import { linesFromBlocks, type OcrLetter, type TesseractBlock } from "../core/ocrwords";
-import type { ScanLine, ScanPicture } from "../scan/look";
+import { linesFromBlocks, splitLinesAtRules, type OcrLine, type TesseractBlock } from "../core/ocrwords";
+import type { ScanPicture } from "../scan/look";
+import { corners, hull, lineQuad, steadyAngles, turnBytes, unturnAngle, unturnPoint, type Turn } from "../scan/orient";
+import { findTurn, turnPng, withoutRules } from "../scan/page";
 import { LANGUAGES, startOcr, type OcrEngine, type OcrLanguage } from "../ocr/engine";
 import { h, icon, reducedMotion, sleep, svg } from "../ui/dom";
 import { baseName, dropzone, formatSize, plural, readBytes, saveFile } from "../ui/files";
@@ -20,7 +22,16 @@ type Box = [number, number, number, number];
 type TextAnn = Extract<Annotation, { type: "text" }>;
 type ReplaceAnn = Extract<Annotation, { type: "replace" }>;
 /** A line of the page's text; lines read from a scan also carry the paper colour. */
-type EditLine = TextLine & { background?: Rgb; scanned?: boolean; words?: OcrWord[]; letters?: OcrLetter[] };
+type EditLine = TextLine & {
+  background?: Rgb;
+  scanned?: boolean;
+  /** The line as OCR read it, in the turned-upright page's points (what the scan painter works with). */
+  scan?: OcrLine;
+  /** Direction the text runs on the page (radians, clockwise from right); 0 for level text. */
+  angle?: number;
+  /** The line's four corners on the page, for tilted or turned lines. */
+  quad?: Point[];
+};
 
 interface Doc {
   file: File;
@@ -80,6 +91,8 @@ export function editTool(): HTMLElement {
   const redraws = new Map<string, number>();
   const scanRenders = new Map<number, { png: Uint8Array; scale: number }>();
   const scanPictures = new Map<number, Promise<ScanPicture>>();
+  /** Quarter turns clockwise that make a scanned page's text upright. */
+  const scanTurns = new Map<number, Turn>();
   try {
     matchScan = localStorage.getItem("eish-scan-look") !== "off";
   } catch {
@@ -188,27 +201,75 @@ export function editTool(): HTMLElement {
       ocrEngine ??= startOcr(scanLanguage);
       const engine = await ocrEngine;
       const png = await pdf.render(session, source, scale);
-      const blocks = await engine.read(png, (p) => {
-        scanProgress.set(source, p);
+      // OCR reads a copy without table rules (they make it skip the writing in the cells).
+      const { clean, rules, width: imgW, height: imgH } = await withoutRules(png, scale);
+      // Scans are often sideways or upside down: find out which way up the page is first.
+      mascot.say("A scanned page! First checking which way up it is…");
+      const turn = await findTurn(engine, clean, (p) => {
+        scanProgress.set(source, p * 0.2);
         showScanState(source);
       });
-      const found = linesFromBlocks(blocks as TesseractBlock[], scale);
-      const colours = await sampleColours(png, found.map((l) => l.bbox), scale);
+      scanTurns.set(source, turn);
+      if (turn) mascot.say("This page is on its side. Turning it the right way up to read it…");
+      const upright = turn ? await turnPng(clean, turn) : clean;
+      const blocks = await engine.read(upright, (p) => {
+        scanProgress.set(source, 0.2 + p * 0.8);
+        showScanState(source);
+      });
+      // Each table cell is its own line: split where a ruled line ran between words.
+      const turnedRules = turnBytes(rules, imgW, imgH, turn);
+      const found = splitLinesAtRules(linesFromBlocks(blocks as TesseractBlock[], scale), turnedRules.data, turnedRules.w, turnedRules.h, scale);
+      // Each line's tilt: its own for long lines (so a warped page follows its curve), the page's usual for short ones.
+      const steady = steadyAngles(found.map((l) => ({ angle: l.angle, length: l.bbox[2] - l.bbox[0], size: l.size })));
+      found.forEach((l, i) => (l.angle = steady[i]));
+      // From the turned page's points to the page's.
+      const toPage = (pt: Point): Point => unturnPoint(turn, pt, width, height);
+      const pageBox = (b: Box): Box => hull(corners(b).map(toPage));
+      const lineBoxes = found.map((l) => pageBox(l.bbox));
+      const colours = await sampleColours(png, lineBoxes, scale);
       if (doc?.session !== session) return [];
-      scanWords.set(source, found.flatMap((l) => l.words));
+      // Words for the invisible search layer, as they sit on the page.
+      scanWords.set(
+        source,
+        found.flatMap((l) =>
+          l.words.map((wd): OcrWord => {
+            const origin = toPage([wd.bbox[0], wd.baseline]);
+            const base = { text: wd.text, bbox: pageBox(wd.bbox), baseline: origin[1], confidence: wd.confidence };
+            const angle = unturnAngle(turn, l.angle);
+            if (!turn && !l.angle) return base;
+            return { ...base, tilt: { origin, length: (wd.bbox[2] - wd.bbox[0]) / Math.max(0.2, Math.cos(l.angle)), height: l.size, angle } };
+          }),
+        ),
+      );
       scanRenders.set(source, { png, scale });
-      mascot.flash("happy", found.length ? `Sho! I read ${plural(found.length, "line")}. Click one to change it.` : "Eish, I couldn't find any text on this page.", 3200);
+      const tilted = found.filter((l) => Math.abs(l.angle) > 0).length;
+      mascot.flash(
+        "happy",
+        found.length
+          ? `Sho! I read ${plural(found.length, "line")}${turn ? " (the page was on its side, no stress)" : ""}${tilted && !turn ? `, ${plural(tilted, "tilted line")} included` : ""}. Click one to change it.`
+          : "Eish, I couldn't find any text on this page.",
+        3600,
+      );
       return found.map((l, i) => ({
         text: l.text,
-        bbox: l.bbox,
-        origin: l.origin,
+        bbox: lineBoxes[i],
+        origin: toPage(l.origin),
         size: l.size,
         color: colours[i].ink,
         background: colours[i].paper,
         font: { name: "", family: "sans", bold: false, italic: false },
         scanned: true,
-        words: l.words,
-        letters: l.letters,
+        scan: l,
+        ...(turn || l.angle
+          ? {
+              angle: unturnAngle(turn, l.angle),
+              quad: lineQuad(
+                l.words.map((wd) => wd.bbox),
+                l.angle,
+                l.size * 0.15,
+              ).map(toPage),
+            }
+          : {}),
       }));
     } catch (err) {
       ocrEngine = undefined;
@@ -251,18 +312,65 @@ export function editTool(): HTMLElement {
       }
       mascot.flash("happy", matchScan ? "Sho! New words will look scanned too." : "Okay, crisp clean text it is.", 2200);
     });
-    // Font choice: the best match, or any of the bundled fonts (listed once they're loaded).
-    const fontSelect = h("select.input.select.small", { "aria-label": "Font for scanned text" }, h("option", { value: "auto" }, "Best match (auto)"));
-    void import("../scan/fonts").then(({ FAMILIES, GENERIC_LABELS }) => {
-      for (const generic of ["serif", "sans", "mono", "hand"] as const) {
-        const group = h("optgroup", { label: GENERIC_LABELS[generic] });
-        for (const f of FAMILIES.filter((x) => x.generic === generic)) group.append(h("option", { value: f.css, selected: f.css === scanFont }, f.label));
+    // Font choice: the best match, or any bundled font, or one from this computer.
+    const fontSelect = h("select.input.select.small", { "aria-label": "Font for scanned text" });
+    const fillFonts = async () => {
+      const { bundledFamilies, myFamilies, GENERIC_LABELS } = await import("../scan/fonts");
+      fontSelect.replaceChildren(h("option", { value: "auto" }, "Best match (auto)"));
+      const groups: ("mine" | "serif" | "sans" | "mono" | "hand" | "display")[] = ["mine", "serif", "sans", "mono", "hand", "display"];
+      for (const generic of groups) {
+        const families = [...bundledFamilies(), ...myFamilies()].filter((x) => x.generic === generic);
+        if (!families.length) continue;
+        const group = h("optgroup", { label: `${GENERIC_LABELS[generic]} (${families.length})` });
+        for (const f of families) group.append(h("option", { value: f.css, selected: f.css === scanFont }, f.label));
         fontSelect.append(group);
       }
-    });
+      fontSelect.value = scanFont;
+    };
+    void fillFonts();
     fontSelect.addEventListener("change", () => {
       scanFont = fontSelect.value;
       mascot.flash("happy", scanFont === "auto" ? "Sho, I'll pick the closest font myself." : "Got it. Click a line to redraw it in that font.", 2400);
+    });
+    // Fonts from this computer (Chrome and Edge ask permission first), or a font file.
+    const mine = h("div.scan-fonts");
+    void import("../scan/fonts").then(({ addFontFile, addLocalFonts, canUseLocalFonts }) => {
+      const refresh = () => {
+        // Fonts added now are tried on lines that haven't been matched yet.
+        lineLooksStale();
+        void fillFonts();
+      };
+      if (canUseLocalFonts()) {
+        const local = h("button.btn.small", { type: "button", title: "Lets Eish PDF try the fonts installed on this computer (Calibri, Arial, Times and the rest) when matching a scan. Nothing is uploaded." }, "Use my computer's fonts");
+        local.addEventListener("click", async () => {
+          try {
+            const added = await addLocalFonts();
+            mascot.flash("happy", `Sho! ${plural(added, "font")} from your computer added to the search.`, 2800);
+            local.textContent = `${plural(added, "font")} from this computer`;
+            refresh();
+          } catch {
+            mascot.flash("eish", "Eish, I wasn't allowed to see your fonts. Allow it in the browser prompt and try again.", 3600);
+          }
+        });
+        mine.append(local);
+      }
+      const file = h("input", { type: "file", accept: ".ttf,.otf,.woff,.woff2", hidden: true, "aria-label": "Font file" });
+      const upload = h("button.btn.small", { type: "button", title: "Add a font file (.ttf, .otf, .woff) for matching a scan" }, "Add a font file");
+      upload.addEventListener("click", () => file.click());
+      file.addEventListener("change", async () => {
+        const chosen = file.files?.[0];
+        if (!chosen) return;
+        try {
+          const family = await addFontFile(chosen);
+          scanFont = family.css;
+          mascot.flash("happy", `Sho! ${family.label} added. Click a line to redraw it in that font.`, 3000);
+          refresh();
+        } catch {
+          mascot.flash("eish", "Eish, that font file didn't open.", 3000);
+        }
+        file.value = "";
+      });
+      mine.append(upload, file);
     });
     return h(
       "div.scan-tools.scan-language",
@@ -270,6 +378,7 @@ export function editTool(): HTMLElement {
       h("label.option", {}, h("span", {}, "Scan language"), select),
       h("label.check", { title: "Redraws your words in the scan's own font or handwriting, size, slant, blur, grain and ink, reusing the scan's own letters and words where it can" }, match, h("span", {}, "Match the scan's look")),
       h("label.option", {}, h("span", {}, "Font"), fontSelect),
+      mine,
     );
   }
 
@@ -282,10 +391,12 @@ export function editTool(): HTMLElement {
         const { ScanPicture } = await import("../scan/look");
         const own = await pdf.scanImage(session, source);
         // Very large scans would use a lot of memory: work from the page as read instead.
-        if (own && own.width * own.height <= 40e6) return ScanPicture.fromPng(own.png, own.matrix, true);
+        const turn = scanTurns.get(source) ?? 0;
+        const { width, height } = doc!.sizes[source];
+        if (own && own.width * own.height <= 40e6) return ScanPicture.fromPng(own.png, own.matrix, true, turn, [width, height]);
         const read = scanRenders.get(source);
         if (!read) throw new Error("This page hasn't been read yet.");
-        return ScanPicture.fromPng(read.png, [1 / read.scale, 0, 0, 1 / read.scale, 0, 0], false);
+        return ScanPicture.fromPng(read.png, [1 / read.scale, 0, 0, 1 / read.scale, 0, 0], false, turn, [width, height]);
       })();
       found.catch(() => scanPictures.delete(source));
       scanPictures.set(source, found);
@@ -293,14 +404,21 @@ export function editTool(): HTMLElement {
     return found;
   }
 
-  const scanLineOf = (line: EditLine): ScanLine => ({ text: line.text, bbox: line.bbox, origin: line.origin, size: line.size, words: line.words ?? [], letters: line.letters ?? [] });
+  const scanLineOf = (line: EditLine) => line.scan!;
 
   /** Works out how a scanned line looks (in the background; cached). */
   async function lookOf(source: number, line: EditLine) {
     const picture = await pictureOf(source);
+    picture.onStatus = (text) => mascot.say(text);
     const all = await linesOf(source);
+    picture.setLines(all.filter((l) => l.scan).map(scanLineOf));
     const others = all.filter((l) => l !== line && l.scanned && Math.abs(l.size - line.size) / line.size < 0.12).map(scanLineOf);
     return { picture, look: await picture.look(scanLineOf(line), others) };
+  }
+
+  /** New fonts were added: lines matched before may match better now. */
+  function lineLooksStale() {
+    scanPictures.clear();
   }
 
   /** Shows "reading…" progress on the page being edited, if it's this one. */
@@ -758,7 +876,7 @@ export function editTool(): HTMLElement {
           if (lines.length === 0) hint.textContent = "No text found on this page, even after reading it.";
           else if (lines.some((l) => l.scanned)) hint.textContent = "Scanned page: click a line to change it. With “Match the scan’s look” on, your words get the scan’s own font, blur and grain.";
           lines.forEach((line, k) => {
-            const r = rect(line.bbox, "line-box");
+            const r: SVGElement = line.quad ? polygon(line.quad, "line-box") : rect(line.bbox, "line-box");
             r.dataset.line = String(k);
             if (p.annotations.some((a) => a.type === "replace" && sameBox(a.rect, line.bbox))) r.classList.add("replaced");
             linesLayer.append(r);
@@ -1022,7 +1140,7 @@ export function editTool(): HTMLElement {
    * styled while the format bar changes, and saves on blur, Ctrl+Enter or a
    * click elsewhere (Esc cancels).
    */
-  function openBox(stage: HTMLElement, W: number, f: Fmt, initial: string, origin: () => Point, save: (text: string, f: Fmt, offset: Point) => void, singleLine: boolean, startOffset: Point = [0, 0]) {
+  function openBox(stage: HTMLElement, W: number, f: Fmt, initial: string, origin: () => Point, save: (text: string, f: Fmt, offset: Point) => void, singleLine: boolean, startOffset: Point = [0, 0], angle = 0) {
     const box = h("textarea.text-box", { rows: 1, "aria-label": "Text", spellcheck: true }) as HTMLTextAreaElement;
     box.value = initial;
     // Drag the grip to move the box (and its text) anywhere on the page.
@@ -1035,8 +1153,12 @@ export function editTool(): HTMLElement {
       styleElement(box, f, k);
       box.style.left = `${x * k}px`;
       box.style.top = `${y * k}px`;
-      grip.style.left = `${x * k - 22}px`;
-      grip.style.top = `${y * k - 2}px`;
+      // Tilted or turned lines: the box is turned to match, about its top-left corner.
+      box.style.transformOrigin = "0 0";
+      box.style.transform = angle ? `rotate(${angle}rad)` : "";
+      const [gx, gy] = [-22 * Math.cos(angle) + 2 * Math.sin(angle), -22 * Math.sin(angle) - 2 * Math.cos(angle)];
+      grip.style.left = `${x * k + gx}px`;
+      grip.style.top = `${y * k + gy}px`;
       const lines = box.value.split("\n");
       const widest = Math.max(...lines.map((l) => measure(l || " ", f)));
       box.style.width = `${Math.max(40, (widest + 12) * k)}px`;
@@ -1159,7 +1281,9 @@ export function editTool(): HTMLElement {
     const detected: Fmt = { ...DEFAULT_FMT, family: line.font.family, bold: line.font.bold, italic: line.font.italic, size: line.size, color: line.color };
     const f: Fmt = prev ? { ...detected, family: prev.font.family, bold: prev.font.bold, italic: prev.font.italic, size: prev.size, color: prev.color, underline: !!prev.underline, strike: !!prev.strike } : detected;
     // Scanned lines: start working out the scan's look while the person types.
-    const scanLook = line.scanned && matchScan ? lookOf(p.source, line) : undefined;
+    // Tilted or turned lines are always redrawn by the scan painter: plain text can't follow them.
+    const tilted = !!line.angle;
+    const scanLook = line.scanned && (matchScan || tilted) ? lookOf(p.source, line) : undefined;
     scanLook?.catch(() => undefined);
     // The box sits where the line's text starts, at the line's top.
     openBox(
@@ -1167,7 +1291,12 @@ export function editTool(): HTMLElement {
       W,
       f,
       prev?.text ?? line.text,
-      () => [line.origin[0] - 2, line.origin[1] - f.size * 0.9 - 2] as Point,
+      () => {
+        // Where the box's top-left corner goes: a little before and above where the text starts, along the line.
+        const [dx, dy] = [-2, -f.size * 0.9 - 2];
+        const a = line.angle ?? 0;
+        return [line.origin[0] + dx * Math.cos(a) - dy * Math.sin(a), line.origin[1] + dx * Math.sin(a) + dy * Math.cos(a)] as Point;
+      },
       (text, f, offset) => {
         const shifted = Math.abs(offset[0]) + Math.abs(offset[1]) > 0.1;
         const unchanged = text === line.text && JSON.stringify(f) === JSON.stringify(detected) && !shifted;
@@ -1199,6 +1328,7 @@ export function editTool(): HTMLElement {
       },
       true,
       prev?.shift,
+      line.angle ?? 0,
     );
   }
 
@@ -1248,6 +1378,10 @@ export function editTool(): HTMLElement {
       mascot.flash("happy", `Sho! Matched the ${look.hand ? "handwriting" : "scan"}: ${font}${from && !faceChanged && scanFont === "auto" ? `, ${from} straight from the scan` : ""}.`, 3400);
     } catch {
       if (!pages.includes(p)) return;
+      if (line.angle) {
+        mascot.flash("eish", "Eish, I couldn't redraw this tilted line. Try again, or pick another font.", 3600);
+        return;
+      }
       place(plain);
       mascot.flash("eish", "Eish, I couldn't match the scan's look here, so I used clean text.", 3000);
     }
@@ -1384,6 +1518,7 @@ export function editTool(): HTMLElement {
     scannedSources.clear();
     scanRenders.clear();
     scanPictures.clear();
+    scanTurns.clear();
     scanFont = "auto";
     closeActive(false);
     if (doc) closeSession(doc.session);
@@ -1476,6 +1611,13 @@ function rect(r: Box, cls?: string): SVGRectElement {
   el.setAttribute("y", String(Math.min(r[1], r[3])));
   el.setAttribute("width", String(Math.abs(r[2] - r[0])));
   el.setAttribute("height", String(Math.abs(r[3] - r[1])));
+  if (cls) el.classList.add(cls);
+  return el;
+}
+
+function polygon(points: Point[], cls?: string): SVGPolygonElement {
+  const el = document.createElementNS(SVG_NS, "polygon");
+  el.setAttribute("points", points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "));
   if (cls) el.classList.add(cls);
   return el;
 }

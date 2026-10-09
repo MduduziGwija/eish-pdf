@@ -11,18 +11,24 @@
 //    the words each way and comparing them with the scan pixel by pixel.
 // 4. Collects the scan's own letters and whole words (when OCR was sure of them
 //    and they can be cut out cleanly), so new text reuses the real thing.
-// 5. Paints: the old words are covered with paper borrowed from around them,
-//    and the new words are drawn in the fitted look. Handwriting gets a little
-//    natural wobble, so no two letters come out identical.
+// 5. Paints: the old words are covered with paper borrowed from around them
+//    (table rules and neighbouring cells are left alone), and the new words are
+//    drawn in the fitted look. Handwriting gets a little natural wobble, so no
+//    two letters come out identical.
+//
+// Pages turned on their side or upside down are turned upright first, and a
+// tilted or warped line is straightened into its own little view, redrawn there,
+// and the result is tilted back into the scan's own pixels.
 import type { OcrLetter } from "../core/ocrwords";
 import type { PixelMatrix } from "../core/scanimage";
 import type { OcrWord, Rgb } from "../core/text";
-import { cssFont, facesOf, FAMILIES, familyByCss, familyFor, loadFace, SCOUTS, type Face, type Generic } from "./fonts";
-import { blur, components, crop, dilate, fillPaper, gaussian, hash, inkBox, ncc, plane, random, resize, type Plane } from "./pixels";
+import { bundledFamilies, cssFont, facesOf, familyByCss, familyFor, loadFace, loadFaces, myFamilies, SCOUTS, type Face, type Family, type Generic } from "./fonts";
+import { applyAff, composeAff, corners, hull, IDENTITY, isExactAff, median, rotateAbout, turnPoint, turnRgba, unturnAngle, unturnPixelsAff, unturnPoint, type Aff, type Turn } from "./orient";
+import { blur, components, crop, dilate, fillPaper, findRules, gaussian, hash, inkBox, ncc, plane, random, resize, type Plane } from "./pixels";
 
 type Box = [number, number, number, number];
 
-/** A line of a scanned page, as OCR read it (page coordinates). */
+/** A line of a scanned page, as OCR read it, in the turned-upright page's coordinates (points). */
 export interface ScanLine {
   text: string;
   bbox: Box;
@@ -30,6 +36,8 @@ export interface ScanLine {
   size: number;
   words: OcrWord[];
   letters: OcrLetter[];
+  /** Tilt of the baseline, radians clockwise from level. */
+  angle: number;
 }
 
 /** A letter or word cut out of the scan. */
@@ -72,6 +80,8 @@ export interface LineLook {
   words: Map<string, Cutout>;
   /** How well the font matches, 0–1. */
   match: number;
+  /** The straightened view of the line this look was measured in. */
+  view: View;
 }
 
 export interface PaintOptions {
@@ -87,21 +97,35 @@ export interface PaintOptions {
   strike?: boolean;
   /** Reuse the scan's own letters and words (default true). */
   letters?: boolean;
-  /** Move the new text this far (page points) from where the old line was. */
+  /** Move the new text this far (page points, as seen on the page) from where the old line was. */
   offset?: [number, number];
+  /** Boxes of other lines' words (the frame's points), which unread-ink clean-up must leave alone. */
+  avoid?: Box[];
 }
 
+/** A redrawn piece of scan: pixels in the scan picture's own frame, and where it sits on the page. */
 export interface Painted {
   png: Uint8Array;
-  /** Top-left in scan pixels, and size. */
+  /** Top-left in the scan picture's pixels, and size. */
   x: number;
   y: number;
   width: number;
   height: number;
-  /** Where it goes on the page. */
+  /** Where it goes on the page (points). */
   box: Box;
-  /** The new words, for the invisible text layer. */
+  /** The new words, for the invisible text layer (page points). */
   words: OcrWord[];
+}
+
+/** What a Frame paints: the same, in the frame's own pixels and points. */
+type FramePainted = Painted;
+
+/** Shared by every line of a scan: the fonts that fitted lately, so the next line starts there. */
+export interface FontSearch {
+  recent: Family[];
+  bestScore: number;
+  /** Told what's happening while a long search runs. */
+  status?: (text: string) => void;
 }
 
 /** How text is drawn: font, size and shape adjustments. */
@@ -227,45 +251,21 @@ function strokeWidth(p: Plane): number {
   return edge ? (2 * area) / edge : NaN;
 }
 
-const median = (xs: number[]) => {
-  const s = [...xs].sort((a, b) => a - b);
-  return s.length ? s[Math.floor(s.length / 2)] : NaN;
-};
-
 const lumOf = (c: Rgb) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
 
-/** The scan's pixels, and where they sit on the page. */
-export class ScanPicture {
-  readonly inPlace: boolean;
-  private readonly cache = new Map<string, Promise<LineLook>>();
-
-  private constructor(
+/**
+ * Upright, level pixels and where they sit in "points": the part that measures and
+ * redraws one line. (The turning and straightening around it is in ScanPicture.)
+ */
+class Frame {
+  constructor(
     readonly width: number,
     readonly height: number,
-    private readonly rgba: Uint8ClampedArray,
+    readonly rgba: Uint8ClampedArray,
     readonly matrix: PixelMatrix,
-    inPlace: boolean,
-  ) {
-    this.inPlace = inPlace;
-  }
-
-  /**
-   * `inPlace`: the pixels are the page's own scan picture, so edits can be written
-   * back into it. Otherwise they're a rendering of the page, and edits go on top.
-   */
-  static async fromPng(png: Uint8Array, matrix: PixelMatrix, inPlace: boolean): Promise<ScanPicture> {
-    const bitmap = await createImageBitmap(new Blob([png as BlobPart], { type: "image/png" }));
-    const { width, height } = bitmap;
-    const c = document.createElement("canvas");
-    c.width = width;
-    c.height = height;
-    const ctx = c.getContext("2d", { willReadFrequently: true })!;
-    ctx.drawImage(bitmap, 0, 0);
-    bitmap.close();
-    const { data } = ctx.getImageData(0, 0, c.width, c.height);
-    c.width = c.height = 0;
-    return new ScanPicture(width, height, data, matrix, inPlace);
-  }
+    readonly inPlace: boolean,
+    private readonly search: FontSearch,
+  ) {}
 
   toPx([x, y]: [number, number]): [number, number] {
     const [a, , , d, e, f] = this.matrix;
@@ -305,19 +305,34 @@ export class ScanPicture {
     return plane(w, h, out);
   }
 
-  /** Works out (once per line) how the line looks. `others`: nearby lines whose letters and words may be reused. */
-  look(line: ScanLine, others: ScanLine[] = []): Promise<LineLook> {
-    const key = line.bbox.join(",");
-    let found = this.cache.get(key);
-    if (!found) {
-      found = this.analyse(line, others);
-      found.catch(() => this.cache.delete(key));
-      this.cache.set(key, found);
+  private frameRules?: Uint8Array;
+
+  /** Whether a ruled line (table border, underline) touches this box, or comes within a pixel or two of it. */
+  touchesRule(box: Box): boolean {
+    if (!this.frameRules) {
+      const sample: number[] = [];
+      for (let i = 0; i < this.width * this.height; i += 37) sample.push(0.299 * this.rgba[i * 4] + 0.587 * this.rgba[i * 4 + 1] + 0.114 * this.rgba[i * 4 + 2]);
+      sample.sort((a, b) => a - b);
+      const [paperLum, inkLum] = [sample[Math.floor(sample.length * 0.85)] ?? 255, sample[Math.floor(sample.length * 0.02)] ?? 0];
+      this.frameRules = findRules(this.coverage([0, 0, this.width, this.height], paperLum, inkLum), Math.max(8, 28 / this.matrix[0]), 1);
     }
-    return found;
+    const [x0, y0, x1, y1] = [Math.max(0, box[0] - 2), Math.max(0, box[1] - 2), Math.min(this.width, box[2] + 2), Math.min(this.height, box[3] + 2)];
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (this.frameRules[y * this.width + x]) return true;
+    return false;
   }
 
-  private async analyse(line: ScanLine, others: ScanLine[]): Promise<LineLook> {
+  /** Ruled lines (table borders, underlines, form boxes) in a region: ink in long straight runs. */
+  rulesIn(box: Box, sizePx: number, paperLum: number, inkLum: number): Uint8Array {
+    const m = Math.ceil(sizePx * 2.4);
+    const big: Box = [Math.max(0, box[0] - m), Math.max(0, box[1] - m), Math.min(this.width, box[2] + m), Math.min(this.height, box[3] + m)];
+    const rules = findRules(this.coverage(big, paperLum, inkLum), Math.max(6, sizePx * 2.2), 1);
+    const [w, h, bw] = [box[2] - box[0], box[3] - box[1], big[2] - big[0]];
+    const out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) out[y * w + x] = rules[(y + box[1] - big[1]) * bw + x + box[0] - big[0]];
+    return out;
+  }
+
+  async analyse(line: ScanLine, others: ScanLine[], straightened = false): Promise<LineLook> {
     // 1. Paper, ink and grain, from the line's own pixels.
     const region = this.boxPx(line.bbox, 3);
     const px = this.pixels(region);
@@ -339,6 +354,10 @@ export class ScanPicture {
     const paperMean = light.reduce((a, b) => a + b, 0) / light.length;
     const paperSd = Math.sqrt(light.reduce((a, b) => a + (b - paperMean) ** 2, 0) / light.length);
     const cover = this.coverage(region, paperLum, inkLum);
+    // Table borders and form boxes crossing the line aren't part of its writing.
+    const sizePx = line.size / this.matrix[3];
+    const ruled = this.rulesIn(region, sizePx, paperLum, inkLum);
+    for (let i = 0; i < ruled.length; i++) if (ruled[i]) cover.data[i] = 0;
     let inked = 0;
     let grey = 0;
     for (const v of cover.data) {
@@ -353,6 +372,14 @@ export class ScanPicture {
       .map((w) => {
         const b = this.boxPx(w.bbox, 2);
         const local = crop(cover, b[0] - region[0], b[1] - region[1], b[2] - b[0], b[3] - b[1]);
+        // Only the ink that belongs to this word: blobs centred inside the word's own box (not a neighbour's edge).
+        const own = this.boxPx(w.bbox);
+        const inner: Box = [own[0] - b[0], own[1] - b[1], own[2] - b[0], own[3] - b[1]];
+        const solid = new Uint8Array(local.w * local.h);
+        for (let i = 0; i < solid.length; i++) solid[i] = local.data[i] > 0.35 ? 1 : 0;
+        const { labels, list } = components(solid, local.w, local.h);
+        const mine = new Set(list.filter((c) => c.count >= 3 && c.cx >= inner[0] && c.cx <= inner[2] && c.cy >= inner[1] && c.cy <= inner[3]).map((c) => c.id));
+        if (mine.size && mine.size < list.length) for (let i = 0; i < labels.length; i++) if (labels[i] && !mine.has(labels[i])) local.data[i] = 0;
         const box = inkBox(local, 0.35);
         if (!box || box[3] - box[1] < 6 || w.text.length < 2) return null;
         return { text: w.text, target: crop(local, box[0], box[1], box[2] - box[0], box[3] - box[1]), local, ink: box };
@@ -361,13 +388,13 @@ export class ScanPicture {
       .sort((a, b) => b.target.w - a.target.w)
       .slice(0, 8);
 
-    const fallbackPx = line.size / this.matrix[3];
-    const score = (face: Face) => {
+    const fallbackPx = sizePx;
+    const score = (face: Face, use: typeof targets = targets) => {
       let total = 0;
       let weights = 0;
       const sizes: number[] = [];
       const stretches: number[] = [];
-      for (const t of targets) {
+      for (const t of use) {
         const r = inkOf({ face, px: PROBE, stretch: 1, shear: 0, stroke: 0 }, t.text);
         if (!r) continue;
         const sy = t.target.h / r.h;
@@ -382,22 +409,53 @@ export class ScanPicture {
       // Fonts that need a lot of squeezing or stretching are probably the wrong font.
       return { face, score: s - Math.max(0, Math.abs(Math.log(stretch || 1)) - 0.08) * 0.8, px: median(sizes), stretch };
     };
+    type Scored = ReturnType<typeof score>;
+    const byScore = (a: Scored, b: Scored) => b.score - a.score;
+    const regularOf = (f: Family): Face => ({ family: f, bold: false, italic: false });
 
-    let candidates: ReturnType<typeof score>[];
+    let candidates: Scored[];
     if (targets.length) {
-      // Scouts first: which kinds of writing (serif, sans, typewriter, handwriting) look closest?
-      const scouts = SCOUTS.map((family) => ({ family, bold: false, italic: false }));
-      await Promise.all(scouts.map(loadFace));
-      const scouted = scouts.map(score);
-      const top = Math.max(...scouted.map((s) => s.score));
-      const kinds = new Set(scouted.filter((s) => s.score >= top - 0.08).map((s) => s.face.family.generic));
-      // Then every font of those kinds, then the styles (bold, italic) of the best two.
-      const regular = FAMILIES.filter((f) => kinds.has(f.generic)).map((family) => ({ family, bold: false, italic: false }));
-      await Promise.all(regular.map(loadFace));
-      const ranked = regular.map(score).sort((a, b) => b.score - a.score);
-      const styled = ranked.slice(0, 2).flatMap((r) => facesOf(r.face.family).slice(1));
-      await Promise.all(styled.map(loadFace));
-      candidates = [...ranked.slice(0, 3), ...styled.map(score)].sort((a, b) => b.score - a.score).slice(0, 3);
+      const state = this.search;
+      let ranked: Scored[] = [];
+      let quick = false;
+      // The next line of a scan is usually in the same font as the last one: try those first.
+      // A line with little to measure (one short word) says too little about its font: stay with the page's fonts.
+      const little = targets.length < 2 || targets.reduce((n, t) => n + t.text.length, 0) < 12;
+      if (state.recent.length) {
+        await loadFaces(state.recent.map(regularOf));
+        ranked = state.recent.map((f) => score(regularOf(f))).sort(byScore);
+        quick = little || ranked[0].score >= state.bestScore - 0.12;
+      }
+      if (!quick) {
+        // Scouts first: which kinds of writing (serif, sans, typewriter, handwriting, headline) look closest?
+        const scouts = SCOUTS.map(regularOf);
+        await loadFaces(scouts);
+        const scouted = scouts.map((f) => score(f));
+        const byKind = new Map<Generic, number>();
+        for (const sc of scouted) byKind.set(sc.face.family.generic, Math.max(byKind.get(sc.face.family.generic) ?? -1, sc.score));
+        const top = Math.max(...byKind.values());
+        // Headline and decorative fonts are only for big text.
+        if (line.size < 20) byKind.delete("display");
+        const kinds = new Set([...byKind].filter(([, v]) => v >= top - 0.08).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k]) => k));
+        // Then every font of those kinds (and the ones from this computer), the widest words first.
+        const families = [...bundledFamilies().filter((f) => kinds.has(f.generic)), ...myFamilies()];
+        state.status?.(`Trying ${families.length} fonts…`);
+        await loadFaces(families.map(regularOf), (p) => state.status?.(`Trying ${families.length} fonts… ${Math.round(p * 100)}%`));
+        const widest = targets.slice(0, 3);
+        const firstPass = families.map((f) => score(regularOf(f), widest)).sort(byScore).slice(0, 24);
+        // A semi-bold scan fits a family's bold better than its regular: try both.
+        const bolds = firstPass.flatMap((r) => facesOf(r.face.family).filter((f) => f.bold && !f.italic));
+        await loadFaces(bolds);
+        ranked = [...firstPass.map((r) => score(r.face)), ...bolds.map((f) => score(f))].sort(byScore);
+      }
+      // Then the styles (bold, italic) of the best few.
+      const key = (f: Face) => `${f.family.css}/${f.bold}/${f.italic}`;
+      const have = new Set(ranked.map((r) => key(r.face)));
+      const styled = ranked.slice(0, 3).flatMap((r) => facesOf(r.face.family).slice(1)).filter((f) => !have.has(key(f)));
+      await loadFaces(styled);
+      candidates = [...ranked.slice(0, 3), ...styled.map((f) => score(f))].sort(byScore).slice(0, 3);
+      if (!quick || candidates[0].score > state.bestScore) state.bestScore = candidates[0].score;
+      state.recent = [...new Map([...candidates, ...ranked].slice(0, 8).map((r) => [r.face.family.css, r.face.family])).values()].slice(0, 6);
     } else {
       const face = { family: familyFor("sans"), bold: false, italic: false };
       await loadFace(face);
@@ -491,7 +549,7 @@ export class ScanPicture {
         if (Number.isFinite(scanStroke) && Number.isFinite(fontStroke)) pen.stroke = Math.min(pen.px * 0.12, Math.max(0, scanStroke - fontStroke));
       }
       // Fonts that only fit when squeezed or stretched are less likely to be the one.
-      const err = sample.length ? error(pen) * (1 + 3 * Math.abs(Math.log(pen.stretch))) : 0;
+      const err = sample.length ? error(pen) * (1 + 10 * Math.abs(Math.log(pen.stretch))) : 0;
       return { pen, err, score: cand.score };
     };
     const best = candidates.map(fitFace).sort((a, b) => a.err - b.err)[0];
@@ -500,7 +558,7 @@ export class ScanPicture {
     // (A few short handwritten words can mislead the size.)
     const lineInk = inkBox(cover, 0.35);
     const drawnLine = inkOf(pen, line.text, sigma);
-    if (lineInk && drawnLine && line.words.length >= 2) {
+    if (lineInk && drawnLine && line.words.length >= 2 && !straightened) {
       const ratio = (lineInk[3] - lineInk[1]) / drawnLine.h;
       if (Math.abs(ratio - 1) > 0.1) {
         const f = Math.min(1.33, Math.max(0.75, ratio));
@@ -553,6 +611,7 @@ export class ScanPicture {
       letters,
       words,
       match: Math.max(0, Math.min(1, best.score)),
+      view: undefined as unknown as View,
     };
   }
 
@@ -601,6 +660,8 @@ export class ScanPicture {
   /** Cuts one letter out of the scan, if it stands apart from its neighbours. */
   private cutLetter(letter: OcrLetter, baseline: number, paperLum: number, inkLum: number): Omit<Cutout, "score"> | null {
     const lb = this.boxPx(letter.bbox);
+    // A letter touching a table border can't be cut out cleanly.
+    if (this.touchesRule(lb)) return null;
     let blobs = 0;
     const g = this.cut(lb, Math.ceil((lb[2] - lb[0]) * 0.5) + 3, baseline, paperLum, inkLum, (c, [lx0, ly0, lx1, ly1]) => {
       const overlapsX = c.x1 > lx0 + 1 && c.x0 < lx1 - 1;
@@ -617,6 +678,7 @@ export class ScanPicture {
   /** Cuts a whole word out of the scan (handwriting is often joined up, so words cut better than letters). */
   private cutWord(word: OcrWord, paperLum: number, inkLum: number): Cutout | null {
     const wb = this.boxPx(word.bbox);
+    if (this.touchesRule(wb)) return null;
     const baseline = this.toPx([0, word.baseline])[1];
     const cut = this.cut(wb, 6, baseline, paperLum, inkLum, (c, [wx0, wy0, wx1, wy1]) => {
       if (c.count < 3) return false;
@@ -644,18 +706,26 @@ export class ScanPicture {
     const fontTop = -measure(pen.face, pen.px, ch).actualBoundingBoxAscent;
     if (Math.abs(g.top + ink[1] - fontTop) > Math.max(2, pen.px * (hand ? 0.2 : 0.12))) return null;
     const target = crop(g.alpha, ink[0], ink[1], gw, gh);
-    const s = ncc(blur(resize(r, gw, gh), Math.max(0.6, sigma)).data, blur(target, 0.6).data);
-    return s >= minScore ? s : null;
+    const drawn = blur(resize(r, gw, gh), Math.max(0.6, sigma));
+    const s = ncc(drawn.data, blur(target, 0.6).data);
+    if (s < minScore) return null;
+    // A bold letter in a regular line (or the other way round) would stick out: compare stroke thickness.
+    if (!hand) {
+      const [fromScan, fromFont] = [strokeWidth(threshold(target)), strokeWidth(threshold(drawn))];
+      if (Number.isFinite(fromScan) && Number.isFinite(fromFont) && (fromScan > fromFont * 1.3 || fromScan < fromFont * 0.7)) return null;
+    }
+    return s;
   }
 
   /** Paints `text` over the line in the line's look. */
-  async paint(line: ScanLine, look: LineLook, text: string, opts: PaintOptions): Promise<Painted> {
+  async paint(line: ScanLine, look: LineLook, text: string, opts: PaintOptions): Promise<FramePainted> {
     const chosen = opts.family ? familyByCss(opts.family) : undefined;
     const family = chosen ?? (opts.style ? (opts.style.generic === look.face.family.generic ? look.face.family : familyFor(opts.style.generic)) : look.face.family);
     const face: Face = { family, bold: opts.style?.bold ?? look.face.bold, italic: opts.style?.italic ?? look.face.italic };
     await loadFace(face);
     const sameFace = face.family === look.face.family && face.bold === look.face.bold && face.italic === look.face.italic;
-    const reuse = opts.letters !== false && sameFace && Math.abs(opts.sizeScale - 1) < 0.03;
+    // The scan's own letters sit next to drawn ones, so they only help when the font matches closely (or it's handwriting).
+    const reuse = opts.letters !== false && sameFace && Math.abs(opts.sizeScale - 1) < 0.03 && (look.hand || look.match >= 0.7);
     const hand = family.generic === "hand";
     const pen: Pen = { face, px: look.px * opts.sizeScale, stretch: look.stretch, shear: chosen && !sameFace ? 0 : look.shear, stroke: look.weight * opts.sizeScale };
     const { sigma } = look;
@@ -725,10 +795,25 @@ export class ScanPicture {
     }
     const total = x;
 
-    // Where the old line's ink is, and where the new text starts.
+    // Where the old line's writing is (not table rules or neighbouring cells), and where the new text starts.
     const lineBox = this.boxPx(line.bbox, 2);
+    const wordPad = Math.ceil(pen.px * 0.15 + sigma * 2);
+    const wordBoxes = line.words.length
+      ? line.words.map((wd) => {
+          const b = this.boxPx(wd.bbox);
+          return [b[0] - wordPad, b[1] - 1 - Math.ceil(sigma), b[2] + wordPad, b[3] + 1 + Math.ceil(sigma)] as Box;
+        })
+      : [lineBox];
+    const inWords = (gx: number, gy: number) => wordBoxes.some((b) => gx >= b[0] && gx < b[2] && gy >= b[1] && gy < b[3]);
     const oldCover = this.coverage(lineBox, lumOf(look.paper), lumOf(look.ink));
-    const oldInk = inkBox(oldCover, 0.3) ?? [0, 0, lineBox[2] - lineBox[0], lineBox[3] - lineBox[1]];
+    const lineRules = this.rulesIn(lineBox, pen.px, lumOf(look.paper), lumOf(look.ink));
+    const lw = lineBox[2] - lineBox[0];
+    const writing = plane(lw, lineBox[3] - lineBox[1]);
+    for (let i = 0; i < writing.data.length; i++) {
+      const [lx, ly] = [i % lw, Math.floor(i / lw)];
+      writing.data[i] = !lineRules[i] && inWords(lineBox[0] + lx, lineBox[1] + ly) ? oldCover.data[i] : 0;
+    }
+    const oldInk = inkBox(writing, 0.3) ?? [0, 0, lineBox[2] - lineBox[0], lineBox[3] - lineBox[1]];
     let baseline = this.toPx([0, line.origin[1]])[1];
     // The new text's first ink lines up with the old line's first ink (unless moved).
     const [dx, dy] = opts.offset ? [opts.offset[0] / this.matrix[0], opts.offset[1] / this.matrix[3]] : [0, 0];
@@ -746,9 +831,11 @@ export class ScanPicture {
     const w = x1 - x0;
     const h = y1 - y0;
     const rgba = this.pixels([x0, y0, x1, y1]);
+    const original = rgba.slice();
     const cover = this.coverage([x0, y0, x1, y1], lumOf(look.paper), lumOf(look.ink));
+    const rules = this.rulesIn([x0, y0, x1, y1], pen.px, lumOf(look.paper), lumOf(look.ink));
 
-    // Cover the old words with paper.
+    // Cover the old words with paper (only inside the words' own boxes).
     const old = new Uint8Array(w * h);
     const inkMask = new Uint8Array(w * h);
     for (let y = 0; y < h; y++) {
@@ -756,9 +843,7 @@ export class ScanPicture {
         const i = y * w + xx;
         const inked = cover.data[i] > 0.12;
         inkMask[i] = inked ? 1 : 0;
-        const gx = xx + x0;
-        const gy = y + y0;
-        if (inked && gx >= lineBox[0] && gx < lineBox[2] && gy >= lineBox[1] && gy < lineBox[3]) old[i] = 1;
+        if (inked && inWords(xx + x0, y + y0)) old[i] = 1;
       }
     }
     // OCR sometimes skips words (messy handwriting especially). Old ink on this
@@ -772,10 +857,20 @@ export class ScanPicture {
       const span1 = originX + total - x0;
       const band0 = lineBox[1] - y0;
       const band1 = lineBox[3] - y0;
+      // Blobs that are mostly table rules are never "writing".
+      const ruleShare = new Map<number, number>();
+      for (let i = 0; i < labels.length; i++) if (labels[i] && rules[i]) ruleShare.set(labels[i], (ruleShare.get(labels[i]) ?? 0) + 1);
+      // Other lines' words (a neighbouring cell the new text runs into) are left as they are.
+      const keepOut = (opts.avoid ?? []).map((b) => {
+        const px = this.boxPx(b);
+        return [px[0] - x0, px[1] - y0, px[2] - x0, px[3] - y0] as Box;
+      });
+      const inKeepOut = (c: { cx: number; cy: number }) => keepOut.some((b) => c.cx >= b[0] && c.cx <= b[2] && c.cy >= b[1] && c.cy <= b[3]);
+      const writingBlob = (c: { id: number; count: number; cx: number; cy: number }) => (ruleShare.get(c.id) ?? 0) / c.count < 0.35 && !inKeepOut(c);
       const hit = new Set<number>();
       for (const c of list) {
         const inBand = Math.min(c.y1, band1) - Math.max(c.y0, band0);
-        if (c.x1 > span0 && c.x0 < span1 && inBand >= (c.y1 - c.y0) * 0.5) hit.add(c.id);
+        if (writingBlob(c) && c.x1 > span0 && c.x0 < span1 && inBand >= (c.y1 - c.y0) * 0.5) hit.add(c.id);
       }
       // Finish words that were started: take neighbouring blobs on the line closer than a word gap.
       const gap = pen.px * 0.3;
@@ -783,7 +878,7 @@ export class ScanPicture {
       while (grew) {
         grew = false;
         for (const c of list) {
-          if (hit.has(c.id)) continue;
+          if (hit.has(c.id) || !writingBlob(c)) continue;
           const inBand = Math.min(c.y1, band1) - Math.max(c.y0, band0);
           if (inBand < (c.y1 - c.y0) * 0.5) continue;
           if (list.some((d) => hit.has(d.id) && c.x0 - d.x1 < gap && d.x0 - c.x1 < gap)) {
@@ -799,8 +894,12 @@ export class ScanPicture {
         for (let i = 0; i < w * h; i++) if (near[i] && inkMask[i]) old[i] = 1;
       }
     }
+    // The soft edge of the old letters goes too, but not neighbouring ink.
     const erase = dilate(old, w, h, Math.ceil(sigma + 1));
+    for (let i = 0; i < erase.length; i++) if (erase[i] && inkMask[i] && !old[i]) erase[i] = 0;
     fillPaper(rgba, w, h, erase, inkMask, rand, look.paper, look.paperSd);
+    // Table rules that ran through the words stay as they were.
+    for (let i = 0; i < rules.length; i++) if (rules[i] && erase[i]) rgba.set(original.subarray(i * 4, i * 4 + 4), i * 4);
 
     // Draw: font letters (blurred like the scan), then the scan's own cut-outs.
     const drawn = drawPlane(w, h, (ctx) => {
@@ -849,6 +948,257 @@ export class ScanPicture {
     const words = placedWords.map((pw) => ({ text: pw.text, bbox: [this.toPage([originX + pw.x0, 0])[0], top, this.toPage([originX + pw.x1, 0])[0], bottom] as Box, baseline: basePt }));
     return { png, x: x0, y: y0, width: w, height: h, box: [bx0, by0, bx1, by1], words };
   }
+}
+
+/** A straightened piece of the scan around one line. */
+export interface View {
+  frame: Frame;
+  /** The line as it is in the straightened view. */
+  line: ScanLine;
+  /** How much the real line is tilted (radians), and the point (turned-page points) it was straightened about. */
+  angle: number;
+  centre: [number, number];
+  /** View pixels → pixels of the upright picture. */
+  toUpright: Aff;
+  /** The line as it is in the upright picture, and how long (points) the text can be before the view must grow. */
+  source: ScanLine;
+  reach: number;
+}
+
+/** Biggest view we'll make, in pixels. */
+const MAX_VIEW = 8e6;
+
+/**
+ * A page's scan, with edits made on it. The page may be turned on its side or
+ * upside down (`turn`), and its lines may be tilted or warped: lines are read in
+ * the turned-upright page, a tilted line is straightened in a small view of its
+ * own, and the redrawn piece is carried back into the scan's own pixels.
+ */
+export class ScanPicture {
+  /** The pixels are the page's own picture, so edits can be written back into it (otherwise edits go on top). */
+  readonly inPlace: boolean;
+  /** The scan picture's own size, in pixels. */
+  readonly width: number;
+  readonly height: number;
+  private readonly upright: Frame;
+  /** Upright-picture pixels → the scan's own pixels. */
+  private readonly toOwn: Aff;
+  private readonly looks = new Map<string, Promise<LineLook>>();
+  private readonly search: FontSearch = { recent: [], bestScore: 0 };
+
+  private constructor(
+    own: { width: number; height: number; matrix: PixelMatrix },
+    upright: { rgba: Uint8ClampedArray; width: number; height: number },
+    readonly turn: Turn,
+    readonly page: [number, number],
+    inPlace: boolean,
+  ) {
+    this.width = own.width;
+    this.height = own.height;
+    this.inPlace = inPlace;
+    this.ownMatrix = own.matrix;
+    this.toOwn = unturnPixelsAff(turn, own.width, own.height);
+    // Where the upright picture's pixels sit in the turned page's points.
+    const toTurnedPage = ([u, v]: [number, number]) => {
+      const [x, y] = applyAff(this.toOwn, [u, v]);
+      const [a, , , d, e, f] = own.matrix;
+      return turnPoint(turn, [a * x + e, d * y + f], page[0], page[1]);
+    };
+    const t0 = toTurnedPage([0, 0]);
+    const t1 = toTurnedPage([1, 1]);
+    this.upright = new Frame(upright.width, upright.height, upright.rgba, [t1[0] - t0[0], 0, 0, t1[1] - t0[1], t0[0], t0[1]], inPlace, this.search);
+  }
+
+  private readonly ownMatrix: PixelMatrix;
+
+  /**
+   * `matrix`: where the picture's pixels sit on the page (points). `inPlace`: the
+   * pixels are the page's own scan picture. `turn`: quarter turns clockwise that
+   * make its text upright. `page`: the page's size in points.
+   */
+  static async fromPng(png: Uint8Array, matrix: PixelMatrix, inPlace: boolean, turn: Turn, page: [number, number]): Promise<ScanPicture> {
+    const bitmap = await createImageBitmap(new Blob([png as BlobPart], { type: "image/png" }));
+    const { width, height } = bitmap;
+    const c = document.createElement("canvas");
+    c.width = width;
+    c.height = height;
+    const ctx = c.getContext("2d", { willReadFrequently: true })!;
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const { data } = ctx.getImageData(0, 0, c.width, c.height);
+    c.width = c.height = 0;
+    const turned = turnRgba(data, width, height, turn);
+    return new ScanPicture({ width, height, matrix }, { rgba: turned.data, width: turned.w, height: turned.h }, turn, page, inPlace);
+  }
+
+  private allLines: ScanLine[] = [];
+
+  /** Every line read on the page: words of other lines are kept out of clean-up when new text runs into them. */
+  setLines(lines: ScanLine[]): void {
+    this.allLines = lines;
+  }
+
+  /** Told what's going on during a long font search. */
+  set onStatus(fn: ((text: string) => void) | undefined) {
+    this.search.status = fn;
+  }
+
+  /** The straightened view of a line (the upright picture itself when the line is level), at least `reach` points long past the line's start. */
+  private viewOf(line: ScanLine, reach = 0): View {
+    const level: View = { frame: this.upright, line, angle: 0, centre: [0, 0], toUpright: IDENTITY, source: line, reach: Infinity };
+    const [su, sv, e, f] = [this.upright.matrix[0], this.upright.matrix[3], this.upright.matrix[4], this.upright.matrix[5]];
+    const theta = line.angle;
+    if (Math.abs(theta) === 0 || Math.abs(su / sv - 1) > 0.02) return level;
+    const bb = line.bbox;
+    const centre: [number, number] = [(bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2];
+    const length = Math.hypot(bb[2] - bb[0], bb[3] - bb[1]);
+    // Room for new text that's longer than the old line: the view reaches as far past the line's start as the text does.
+    const span = Math.max(length, 2 * reach - length);
+    const w = Math.ceil((span + line.size * 6) / su);
+    const h = Math.ceil((line.size * 5.6) / sv);
+    if (w * h > MAX_VIEW) return level;
+    const cos = Math.cos(theta);
+    const sin = Math.sin(theta);
+    const [cu, cv] = [(centre[0] - e) / su, (centre[1] - f) / sv];
+    const { rgba, width: uw, height: uh } = this.upright;
+    const out = new Uint8ClampedArray(w * h * 4);
+    for (let vy = 0; vy < h; vy++) {
+      for (let vx = 0; vx < w; vx++) {
+        const dx = vx + 0.5 - w / 2;
+        const dy = vy + 0.5 - h / 2;
+        // Bilinear sample of the upright picture, edges repeated.
+        const ux = Math.min(uw - 1, Math.max(0, cu + cos * dx - sin * dy - 0.5));
+        const uy = Math.min(uh - 1, Math.max(0, cv + sin * dx + cos * dy - 0.5));
+        const x0 = Math.floor(ux);
+        const y0 = Math.floor(uy);
+        const x1 = Math.min(uw - 1, x0 + 1);
+        const y1 = Math.min(uh - 1, y0 + 1);
+        const tx = ux - x0;
+        const ty = uy - y0;
+        const o = (vy * w + vx) * 4;
+        for (let k = 0; k < 4; k++) {
+          const top = rgba[(y0 * uw + x0) * 4 + k] * (1 - tx) + rgba[(y0 * uw + x1) * 4 + k] * tx;
+          const bottom = rgba[(y1 * uw + x0) * 4 + k] * (1 - tx) + rgba[(y1 * uw + x1) * 4 + k] * tx;
+          out[o + k] = top * (1 - ty) + bottom * ty;
+        }
+      }
+    }
+    // The view's own points are the turned page's points, with the line level.
+    const matrix: PixelMatrix = [su, 0, 0, sv, centre[0] - (su * w) / 2, centre[1] - (sv * h) / 2];
+    const level0 = (p: [number, number]) => rotateAbout(p, centre, -theta);
+    // A tilted word's box is the outline of its tilted shape: undo that to get the word's own size.
+    const c = Math.abs(cos);
+    const sn = Math.abs(sin);
+    const den = c * c - sn * sn;
+    const box = (b: Box): Box => {
+      const [bw, bh] = [b[2] - b[0], b[3] - b[1]];
+      const [len, thick] = [Math.max(1, (bw * c - bh * sn) / den), Math.max(1, (bh * c - bw * sn) / den)];
+      const mid = level0([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]);
+      return [mid[0] - len / 2, mid[1] - thick / 2, mid[0] + len / 2, mid[1] + thick / 2];
+    };
+    const straightWords = line.words.map((wd) => ({ ...wd, bbox: box(wd.bbox), baseline: level0([wd.bbox[0], wd.baseline])[1] }));
+    const straight: ScanLine = {
+      ...line,
+      angle: 0,
+      bbox: straightWords.length ? hull(straightWords.flatMap((wd) => corners(wd.bbox))) : box(line.bbox),
+      origin: level0(line.origin),
+      words: straightWords,
+      letters: line.letters.map((l) => ({ ...l, bbox: box(l.bbox) })),
+    };
+    const toUpright: Aff = [cos, sin, -sin, cos, cu - (cos * w) / 2 + (sin * h) / 2, cv - (sin * w) / 2 - (cos * h) / 2];
+    return { frame: new Frame(w, h, out, matrix, this.inPlace, this.search), line: straight, angle: theta, centre, toUpright, source: line, reach: Math.max(length, reach) };
+  }
+
+  /** Works out (once per line) how the line looks. `others`: nearby lines whose letters and words may be reused (level lines only). */
+  look(line: ScanLine, others: ScanLine[] = []): Promise<LineLook> {
+    const key = line.bbox.join(",");
+    let found = this.looks.get(key);
+    if (!found) {
+      found = (async () => {
+        const view = this.viewOf(line);
+        const look = await view.frame.analyse(view.line, view.angle === 0 ? others.filter((o) => o.angle === 0) : [], view.angle !== 0);
+        look.view = view;
+        return look;
+      })();
+      found.catch(() => this.looks.delete(key));
+      this.looks.set(key, found);
+    }
+    return found;
+  }
+
+  /** Paints `text` over the line in the line's look, and returns it in the scan picture's own pixels. */
+  async paint(_line: ScanLine, look: LineLook, text: string, opts: PaintOptions): Promise<Painted> {
+    const [W, H] = this.page;
+    // A straightened view is sized for the old line: if the new text is longer, make the view bigger.
+    let view = look.view;
+    if (view.angle !== 0) {
+      const lengthPt = measure(look.face, look.px, text).width * look.stretch * this.upright.matrix[0] * 1.15;
+      if (lengthPt > view.reach) view = look.view = this.viewOf(view.source, lengthPt);
+    }
+    // A move, as seen on the page → in the turned page → along the straightened line.
+    let offset: [number, number] | undefined;
+    if (opts.offset) {
+      const [dx, dy] = opts.offset;
+      const turned: [number, number] = [[dx, dy], [-dy, dx], [-dx, -dy], [dy, -dx]][this.turn] as [number, number];
+      offset = rotateAbout(turned, [0, 0], -view.angle);
+    }
+    // Other lines' words, in the straightened view's points.
+    const avoid = this.allLines
+      .filter((l) => l.bbox.some((v, i) => Math.abs(v - view.source.bbox[i]) > 0.01))
+      .flatMap((l) => l.words.map((wd) => wd.bbox))
+      .map((b): Box => (view.angle ? hull(corners(b).map((p) => rotateAbout(p, view.centre, -view.angle))) : b));
+    const framed = await view.frame.paint(view.line, look, text, { ...opts, offset, avoid });
+
+    // The painted piece's pixels → the scan's own pixels.
+    const toOwn = composeAff(this.toOwn, composeAff(view.toUpright, [1, 0, 0, 1, framed.x, framed.y]));
+    const patch = await warpPatch(framed.png, toOwn, [framed.width, framed.height], this.width, this.height);
+
+    // Where it sits on the page.
+    const [a, , , d, e, f] = this.ownMatrix;
+    const onPage = ([x, y]: [number, number]): [number, number] => [a * x + e, d * y + f];
+    const box = hull(corners([patch.x, patch.y, patch.x + patch.width, patch.y + patch.height]).map(onPage));
+
+    // The new words, back on the page: from the straightened view, to the turned page, to the page.
+    const pageAngle = unturnAngle(this.turn, view.angle);
+    const level = Math.abs(pageAngle) < 1e-6;
+    const toPage = (p: [number, number]): [number, number] => unturnPoint(this.turn, view.angle ? rotateAbout(p, view.centre, view.angle) : p, W, H);
+    const words: OcrWord[] = framed.words.map((wd) => {
+      const [x0, y0, x1, y1] = wd.bbox;
+      const origin = toPage([x0, wd.baseline]);
+      return {
+        text: wd.text,
+        bbox: hull(corners(wd.bbox).map(toPage)),
+        baseline: origin[1],
+        ...(level ? {} : { tilt: { origin, length: x1 - x0, height: y1 - y0, angle: pageAngle } }),
+      };
+    });
+    return { png: patch.png, x: patch.x, y: patch.y, width: patch.width, height: patch.height, box, words };
+  }
+}
+
+/** Carries a painted piece (a PNG with see-through parts) into the scan's own pixels with the map `aff`. */
+async function warpPatch(png: Uint8Array, aff: Aff, size: [number, number], Wo: number, Ho: number): Promise<{ png: Uint8Array; x: number; y: number; width: number; height: number }> {
+  const bitmap = await createImageBitmap(new Blob([png as BlobPart], { type: "image/png" }));
+  const [bx0, by0, bx1, by1] = hull(corners([0, 0, size[0], size[1]]).map((p) => applyAff(aff, p)));
+  const x0 = Math.max(0, Math.floor(bx0 + 1e-6));
+  const y0 = Math.max(0, Math.floor(by0 + 1e-6));
+  const x1 = Math.min(Wo, Math.ceil(bx1 - 1e-6));
+  const y1 = Math.min(Ho, Math.ceil(by1 - 1e-6));
+  const w = Math.max(1, x1 - x0);
+  const h = Math.max(1, y1 - y0);
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d")!;
+  // Whole-pixel moves and quarter turns copy exactly; anything else is smoothed.
+  ctx.imageSmoothingEnabled = !isExactAff(aff);
+  ctx.imageSmoothingQuality = "high";
+  ctx.setTransform(aff[0], aff[1], aff[2], aff[3], aff[4] - x0, aff[5] - y0);
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const blob = await new Promise<Blob | null>((resolve) => c.toBlob(resolve, "image/png"));
+  if (!blob) throw new Error("Couldn't redraw the scan.");
+  return { png: new Uint8Array(await blob.arrayBuffer()), x: x0, y: y0, width: w, height: h };
 }
 
 async function toPng(rgba: Uint8ClampedArray, w: number, h: number): Promise<Uint8Array> {

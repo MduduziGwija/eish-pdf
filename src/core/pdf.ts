@@ -301,8 +301,8 @@ function applyReplacements(pdf: mupdf.PDFDocument, index: number, all: Replace[]
     if (writeScanPatches(pdf, index, size, patches)) overlays = overlays.filter((a) => !inPlace.includes(a));
   }
   // Otherwise the old text is removed and the redrawn piece goes on top.
-  const replaces = all.filter((a) => !a.scan || overlays.includes(a));
-  if (replaces.length === 0) return;
+  const replaces = all.filter((a) => !a.scan);
+  if (replaces.length === 0 && overlays.length === 0) return;
   const page = pdf.loadPage(index);
   try {
     // Note the page's fonts before redaction removes the lines that use them.
@@ -313,7 +313,7 @@ function applyReplacements(pdf: mupdf.PDFDocument, index: number, all: Replace[]
       const inset = (y1 - y0) * 0.12;
       page.createAnnotation("Redact").setRect([x0, y0 + inset, x1, y1 - inset]);
     }
-    page.applyRedactions(false, 2, 1, 0);
+    if (replaces.length) page.applyRedactions(false, 2, 1, 0);
     // On scans, paint the removed area in the paper's colour so it blends in.
     const patches = replaces.filter((a) => a.background && !a.scan);
     if (patches.length) {

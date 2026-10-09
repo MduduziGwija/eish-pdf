@@ -40,6 +40,7 @@ interface Found {
 function findScanImage(pdf: mupdf.PDFDocument, index: number): Found | null {
   const page = pdf.loadPage(index);
   let best: { width: number; height: number; ctm: number[]; area: number } | undefined;
+  let layered = false;
   let pageArea: number;
   try {
     const [x0, y0, x1, y1] = page.getBounds();
@@ -48,15 +49,22 @@ function findScanImage(pdf: mupdf.PDFDocument, index: number): Found | null {
       new mupdf.Device({
         fillImage(image, ctm) {
           const area = Math.abs(ctm[0] * ctm[3] - ctm[1] * ctm[2]);
+          // A second big picture is a layer too.
+          if (best && area > pageArea * 0.05) layered = true;
           if (!best || area > best.area) best = { width: image.getWidth(), height: image.getHeight(), ctm: [...ctm], area };
         },
+        // Copiers often save a scan in layers: a low-resolution colour picture with the
+        // black text drawn on top as separate masks. Changing only the picture would
+        // leave the old text showing, so such pages are edited on top instead.
+        fillImageMask: () => void (layered = true),
+        clipImageMask: () => void (layered = true),
       }),
       mupdf.Matrix.identity,
     );
   } finally {
     page.destroy();
   }
-  if (!best || best.area < pageArea * 0.3) return null;
+  if (!best || best.area < pageArea * 0.3 || layered) return null;
   const [a, b, c, d, e, f] = best.ctm;
   // Upright only: rows of pixels must run along the page's lines of text.
   if (Math.abs(b) > 1e-3 * Math.abs(a) || Math.abs(c) > 1e-3 * Math.abs(d) || a <= 0 || d <= 0) return null;

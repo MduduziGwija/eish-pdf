@@ -75,6 +75,7 @@ describe("joining split OCR lines", () => {
     size,
     words: [{ text, bbox: [x0, baseline - size * 0.75, x1, baseline + size * 0.2], baseline }],
     letters: [],
+    angle: 0,
   });
 
   it("joins pieces of one line, and leaves separate lines and columns alone", () => {

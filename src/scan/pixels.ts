@@ -264,3 +264,38 @@ export function fillPaper(rgba: Uint8ClampedArray, w: number, h: number, mask: U
     }
   }
 }
+
+/**
+ * Pixels that belong to ruled lines (table borders, underlines, form boxes):
+ * ink in runs longer than `minRun` along a row or a column. Letters never have
+ * runs that long, so text is left alone. Grown by `grow` pixels to catch the soft edge.
+ */
+export function findRules(ink: Plane, minRun: number, grow = 1, threshold = 0.45): Uint8Array {
+  const { w, h, data } = ink;
+  const mark = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    let x = 0;
+    while (x < w) {
+      if (data[y * w + x] <= threshold) {
+        x++;
+        continue;
+      }
+      const start = x;
+      while (x < w && data[y * w + x] > threshold) x++;
+      if (x - start >= minRun) for (let k = start; k < x; k++) mark[y * w + k] = 1;
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let y = 0;
+    while (y < h) {
+      if (data[y * w + x] <= threshold) {
+        y++;
+        continue;
+      }
+      const start = y;
+      while (y < h && data[y * w + x] > threshold) y++;
+      if (y - start >= minRun) for (let k = start; k < y; k++) mark[k * w + x] = 1;
+    }
+  }
+  return dilate(mark, w, h, grow);
+}
