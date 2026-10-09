@@ -95,6 +95,15 @@ describe("table rules", () => {
     expect(rules[18 * 60 + 5]).toBe(0);
   });
 
+  it("follows a rule that drifts a little (a page scanned slightly crooked)", () => {
+    const p = plane(300, 40);
+    for (let x = 0; x < 300; x++) p.data[(10 + Math.floor(x / 40)) * 300 + x] = 1; // drops a pixel every 40
+    const rules = findRules(p, 200, 0);
+    expect(rules[10 * 300 + 5]).toBe(1);
+    expect(rules[13 * 300 + 150]).toBe(1);
+    expect(rules[16 * 300 + 290]).toBe(0); // (that pixel isn't on the line)
+  });
+
   it("splits a table row into its cells", () => {
     const [w, h, scale] = [200, 40, 1];
     const rules = new Uint8Array(w * h);

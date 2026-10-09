@@ -206,6 +206,8 @@ export type Annotation =
       scan?: ScanEdit;
       /** The new text moved this far from where the old line was (the old line is still removed). */
       shift?: [number, number];
+      /** Set when this is one line of an edited paragraph: all lines of the paragraph share it. */
+      para?: string;
     };
 
 /** A line of a scan, redrawn in the scan's own look (see src/scan). */
@@ -309,15 +311,17 @@ function applyReplacements(pdf: mupdf.PDFDocument, index: number, all: Replace[]
   try {
     // Note the page's fonts before redaction removes the lines that use them.
     const fonts = collectFonts(page);
-    for (const a of replaces) {
+    // (An empty rectangle is a line added below a paragraph: nothing to remove.)
+    const removing = replaces.filter((a) => a.rect[2] - a.rect[0] > 0.5 && a.rect[3] - a.rect[1] > 0.5);
+    for (const a of removing) {
       // Inset a little so neighbouring lines' ascenders and descenders survive.
       const [x0, y0, x1, y1] = normalise(a.rect);
       const inset = (y1 - y0) * 0.12;
       page.createAnnotation("Redact").setRect([x0, y0 + inset, x1, y1 - inset]);
     }
-    if (replaces.length) page.applyRedactions(false, 2, 1, 0);
+    if (removing.length) page.applyRedactions(false, 2, 1, 0);
     // On scans, paint the removed area in the paper's colour so it blends in.
-    const patches = replaces.filter((a) => a.background && !a.scan);
+    const patches = replaces.filter((a) => a.background && !a.scan && a.rect[2] - a.rect[0] > 0.5);
     if (patches.length) {
       const map = toUserSpace(page);
       let ops = "";

@@ -93,7 +93,7 @@ export async function withoutRules(png: Uint8Array, scale: number): Promise<{ cl
     ink.data[i] = Math.min(1, Math.max(0, (paperLum - lum) / range));
   }
   // Runs longer than any letter: about 28pt of ink in a straight line.
-  const rules = findRules(ink, Math.round(28 * scale), 1);
+  const rules = findRules(ink, Math.round(28 * scale), 1, 0.18);
   let count = 0;
   for (let i = 0; i < rules.length; i++) count += rules[i];
   if (count < w * h * 0.0004) return { clean: png, rules, width: w, height: h };

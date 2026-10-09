@@ -53,7 +53,13 @@ describe("scan pixel helpers", () => {
       rgba.set([20, 20, 20, 255], (y * w + x) * 4);
     }
     fillPaper(rgba, w, h, mask, mask, random(1), [240, 230, 200], 2);
-    for (let i = 0; i < w * h; i++) expect(Array.from(rgba.slice(i * 4, i * 4 + 3))).toEqual([240, 230, 200]);
+    // Paper again, with a little grain (no trace of the old ink).
+    for (let i = 0; i < w * h; i++) {
+      const [r, g, b] = Array.from(rgba.slice(i * 4, i * 4 + 3));
+      expect(Math.abs(r - 240)).toBeLessThan(12);
+      expect(Math.abs(g - 230)).toBeLessThan(12);
+      expect(Math.abs(b - 200)).toBeLessThan(12);
+    }
   });
 
   it("repeats the same noise for the same seed", () => {

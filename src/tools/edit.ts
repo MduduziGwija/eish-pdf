@@ -1,5 +1,6 @@
 import { pdf, PdfError } from "../core/client";
 import { baselineOf, LINE_HEIGHT } from "../core/layout";
+import { frameOf, fromFrame, groupParagraphs, layoutParagraph, paragraphText, wrapText, type ParaLine, type Paragraph } from "../core/paragraphs";
 import type { Annotation, PageEdit, PageSize, Rgb, Rotation } from "../core/pdf";
 import type { OcrWord, TextLine } from "../core/text";
 import { linesFromBlocks, splitLinesAtRules, type OcrLine, type TesseractBlock } from "../core/ocrwords";
@@ -32,6 +33,19 @@ type EditLine = TextLine & {
   /** The line's four corners on the page, for tilted or turned lines. */
   quad?: Point[];
 };
+
+/** A line, with what grouping needs to know about it. */
+type PLine = EditLine & ParaLine;
+
+/** A block of lines edited together (reflowed when its text changes). */
+interface EditPara extends Paragraph<PLine> {
+  /** Same for every edit of this paragraph. */
+  key: string;
+  bbox: Box;
+  /** The paragraph's corners, for turned or tilted text. */
+  quad?: Point[];
+  angle: number;
+}
 
 interface Doc {
   file: File;
@@ -88,11 +102,22 @@ export function editTool(): HTMLElement {
   const scannedSources = new Set<number>();
   let scanLanguage: OcrLanguage = "eng";
   // Scanned lines are redrawn in the scan's own look (font, blur, grain), unless turned off.
+  /** Whether clicking edits a whole paragraph (reflowing) or one line. Until the person chooses, real text defaults to paragraphs and scans to lines (forms and handwriting are easily grouped wrongly). */
+  let editByChoice: "paragraph" | "line" | undefined;
+  try {
+    const saved = localStorage.getItem("eish-edit-by");
+    if (saved === "line" || saved === "paragraph") editByChoice = saved;
+  } catch {
+    // Storage blocked: the defaults.
+  }
+  const editByFor = (source: number): "paragraph" | "line" => editByChoice ?? (scannedSources.has(source) ? "line" : "paragraph");
   let matchScan = true;
   /** "auto", or the CSS name of a font picked for redrawing scanned lines. */
   let scanFont = "auto";
   const redraws = new Map<string, number>();
   const scanRenders = new Map<number, { png: Uint8Array; scale: number }>();
+  /** Ruled lines found on each scanned page, in the turned-upright image's pixels. */
+  const scanRules = new Map<number, { data: Uint8Array; w: number; h: number; scale: number }>();
   const scanPictures = new Map<number, Promise<ScanPicture>>();
   /** Quarter turns clockwise that make a scanned page's text upright. */
   const scanTurns = new Map<number, Turn>();
@@ -191,6 +216,60 @@ export function editTool(): HTMLElement {
     return lines;
   };
 
+  const lengthOf = (l: EditLine) => (l.quad ? Math.hypot(l.quad[1][0] - l.quad[0][0], l.quad[1][1] - l.quad[0][1]) : l.bbox[2] - l.bbox[0]);
+
+  /** For a scanned page: whether a ruled line (a table border) runs between two lines, so they can't be one paragraph. */
+  function ruleBetween(source: number): ((above: PLine, below: PLine) => boolean) | undefined {
+    const rules = scanRules.get(source);
+    if (!rules) return undefined;
+    return (above, below) => {
+      const [a, b] = [above.scan, below.scan];
+      if (!a || !b) return false;
+      // From just above the upper line's baseline (a table border sits right under its text) to just inside the lower line.
+      const [yFrom, yTo] = [Math.floor((a.origin[1] - a.size * 0.08) * rules.scale), Math.ceil((b.bbox[1] + b.size * 0.3) * rules.scale)];
+      const [xFrom, xTo] = [Math.floor(Math.max(a.bbox[0], b.bbox[0]) * rules.scale), Math.ceil(Math.min(a.bbox[2], b.bbox[2]) * rules.scale)];
+      if (yTo <= yFrom || xTo <= xFrom) return false;
+      // A rule crosses most of the width somewhere in the gap (it may slant a little, so look column by column).
+      let columns = 0;
+      for (let x = Math.max(0, xFrom); x < Math.min(rules.w, xTo); x++) {
+        for (let y = Math.max(0, yFrom); y < Math.min(rules.h, yTo); y++) {
+          if (rules.data[y * rules.w + x]) {
+            columns++;
+            break;
+          }
+        }
+      }
+      return columns >= (xTo - xFrom) * 0.6;
+    };
+  }
+
+  /** The page's text as paragraphs (or single lines, if that's how the person edits). */
+  async function paragraphsOf(source: number): Promise<EditPara[]> {
+    const lines = await linesOf(source);
+    const plines: PLine[] = lines.map((l) => ({ ...l, angle: l.angle ?? 0, length: lengthOf(l) }));
+    const groups: Paragraph<PLine>[] =
+      editByFor(source) === "line"
+        ? plines.map((l) => {
+            const u0 = frameOf(l.origin, l.angle)[0];
+            return { lines: [l], leading: 0, align: "left" as const, left: u0, right: u0 + l.length };
+          })
+        : groupParagraphs(plines, ruleBetween(source));
+    return groups.map((g): EditPara => {
+      const first = g.lines[0];
+      const last = g.lines.at(-1)!;
+      const angle = first.angle;
+      const single = g.lines.length === 1;
+      const [, v0] = frameOf(first.origin, angle);
+      const [, v1] = frameOf(last.origin, angle);
+      const quad = single
+        ? first.quad
+        : angle
+          ? ([[g.left, v0 - first.size * 0.9], [g.right, v0 - first.size * 0.9], [g.right, v1 + last.size * 0.28], [g.left, v1 + last.size * 0.28]] as Point[]).map((pt) => fromFrame(pt, angle))
+          : undefined;
+      return { ...g, key: `P|${first.bbox.map((v) => Math.round(v)).join(",")}`, bbox: single ? first.bbox : hull(g.lines.flatMap((l) => corners(l.bbox))), quad, angle };
+    });
+  }
+
   async function readScannedPage(source: number): Promise<EditLine[]> {
     const session = doc!.session;
     const { width, height } = doc!.sizes[source];
@@ -245,6 +324,7 @@ export function editTool(): HTMLElement {
         ),
       );
       scanRenders.set(source, { png, scale });
+      scanRules.set(source, { data: turnedRules.data, w: turnedRules.w, h: turnedRules.h, scale });
       const tilted = found.filter((l) => Math.abs(l.angle) > 0).length;
       mascot.flash(
         "happy",
@@ -282,6 +362,28 @@ export function editTool(): HTMLElement {
       scanProgress.delete(source);
       showScanState(source);
     }
+  }
+
+  /** "Paragraph | Line": whether a click edits a whole paragraph (reflowing) or one line. */
+  function editByToggle(source: number): HTMLElement {
+    const choose = (mode: "paragraph" | "line") => {
+      if (editByFor(source) === mode) return;
+      editByChoice = mode;
+      try {
+        localStorage.setItem("eish-edit-by", mode);
+      } catch {
+        // Not remembered, that's fine.
+      }
+      closeActive();
+      render();
+    };
+    const choice = (mode: "paragraph" | "line", label: string, title: string) => h("button.fmt-btn.wide", { type: "button", "aria-pressed": String(editByFor(source) === mode), title, onclick: () => choose(mode) }, label);
+    return h(
+      "div.fmt-group.edit-by",
+      { role: "group", "aria-label": "What a click edits" },
+      choice("paragraph", "Paragraph", "Click a paragraph to edit all of it; the text reflows as you type"),
+      choice("line", "Line", "Click a single line to change just that line"),
+    );
   }
 
   /** The "Scan language" dropdown, shown once a page turns out to be a scan. */
@@ -376,12 +478,17 @@ export function editTool(): HTMLElement {
       mine.append(upload, file);
     });
     return h(
-      "div.scan-tools.scan-language",
+      "details.scan-options.scan-language",
       { hidden: !scannedSources.has(source) },
-      h("label.option", {}, h("span", {}, "Scan language"), select),
+      h("summary", {}, "Scan options"),
+      h(
+        "div.scan-tools",
+        {},
+        h("label.option", {}, h("span", {}, "Scan language"), select),
       h("label.check", { title: "Redraws your words in the scan's own font or handwriting, size, slant, blur, grain and ink, reusing the scan's own letters and words where it can" }, match, h("span", {}, "Match the scan's look")),
       h("label.option", {}, h("span", {}, "Font"), fontSelect),
       mine,
+      ),
     );
   }
 
@@ -817,6 +924,7 @@ export function editTool(): HTMLElement {
       "div.tool-options",
       {},
       fbar?.el,
+      tool === "retext" && !rotatedRetext && editByToggle(p.source),
       tool === "draw" && penSwatches,
       tool === "draw" && h("label.slider", {}, h("span", {}, "Thickness"), penInput),
       tool === "select" && h("button.btn.small.danger", { type: "button", disabled: selected === undefined, onclick: () => deleteSelected() }, "Delete selected"),
@@ -876,16 +984,22 @@ export function editTool(): HTMLElement {
 
     if (tool === "retext" && !rotatedRetext) {
       requestAnimationFrame(() => showScanState(p.source));
-      linesOf(p.source)
-        .then((lines) => {
+      Promise.all([linesOf(p.source), paragraphsOf(p.source)])
+        .then(([lines, paras]) => {
           if (!stage.isConnected) return;
           const hint = options.querySelector(".tool-hint")!;
+          const mode = editByFor(p.source);
+          // The switch was drawn before the page was read (and known to be a scan): bring it up to date.
+          options.querySelectorAll(".edit-by .fmt-btn").forEach((btn, i) => btn.setAttribute("aria-pressed", String((i === 0) === (mode === "paragraph"))));
+          const what = mode === "paragraph" ? "a paragraph" : "a line";
           if (lines.length === 0) hint.textContent = "No text found on this page, even after reading it.";
-          else if (lines.some((l) => l.scanned)) hint.textContent = "Scanned page: click a line to change it. With “Match the scan’s look” on, your words get the scan’s own font, blur and grain.";
-          lines.forEach((line, k) => {
-            const r: SVGElement = line.quad ? polygon(line.quad, "line-box") : rect(line.bbox, "line-box");
-            r.dataset.line = String(k);
-            if (p.annotations.some((a) => a.type === "replace" && sameBox(a.rect, line.bbox))) r.classList.add("replaced");
+          else if (lines.some((l) => l.scanned)) hint.textContent = `Scanned page: click ${what} to change it.`;
+          else hint.textContent = `Click ${what} to change it.`;
+          paras.forEach((para, k) => {
+            const r: SVGElement = para.quad ? polygon(para.quad, "line-box") : rect(para.bbox, "line-box");
+            r.dataset.para = String(k);
+            if (para.lines.length > 1) r.classList.add("multi");
+            if (p.annotations.some((a) => a.type === "replace" && (a.para === para.key || para.lines.some((l) => sameBox(a.rect, l.bbox))))) r.classList.add("replaced");
             linesLayer.append(r);
           });
         })
@@ -1153,11 +1267,15 @@ export function editTool(): HTMLElement {
         if (p.rotate !== 0) return;
         e.preventDefault();
         const hit = annotationAt(e);
-        const existing = hit !== undefined && p.annotations[hit].type === "replace" ? hit : undefined;
+        const hitAnn = hit !== undefined && p.annotations[hit].type === "replace" ? (p.annotations[hit] as ReplaceAnn) : undefined;
         const lineEl = (e.target as Element).closest?.(".line-box") as SVGElement | null;
-        void linesOf(p.source).then((lines) => {
-          const line = existing !== undefined ? lines.find((l) => sameBox(l.bbox, (p.annotations[existing] as ReplaceAnn).rect)) : lineEl ? lines[Number(lineEl.dataset.line)] : undefined;
-          if (line) openReplaceBox(stage, p, W, line, existing);
+        void paragraphsOf(p.source).then((paras) => {
+          const para = hitAnn ? paras.find((q) => (hitAnn.para && q.key === hitAnn.para) || q.lines.some((l) => sameBox(l.bbox, hitAnn.rect))) : lineEl ? paras[Number(lineEl.dataset.para)] : undefined;
+          if (!para) return;
+          if (para.lines.length > 1) return openParagraphBox(stage, p, W, para);
+          // One line: edit it directly (keeping an earlier edit of it, if there is one).
+          const existing = hitAnn && !hitAnn.para ? hit : p.annotations.findIndex((a) => a.type === "replace" && !a.para && sameBox(a.rect, para.lines[0].bbox));
+          openReplaceBox(stage, p, W, para.lines[0], existing !== undefined && existing >= 0 ? existing : undefined);
         });
         return;
       }
@@ -1229,7 +1347,7 @@ export function editTool(): HTMLElement {
    * styled while the format bar changes, and saves on blur, Ctrl+Enter or a
    * click elsewhere (Esc cancels).
    */
-  function openBox(stage: HTMLElement, W: number, f: Fmt, initial: string, origin: () => Point, save: (text: string, f: Fmt, offset: Point) => void, singleLine: boolean, startOffset: Point = [0, 0], angle = 0) {
+  function openBox(stage: HTMLElement, W: number, f: Fmt, initial: string, origin: () => Point, save: (text: string, f: Fmt, offset: Point) => void, singleLine: boolean, startOffset: Point = [0, 0], angle = 0, block?: { width: number; leading: number }) {
     const box = h("textarea.text-box", { rows: 1, "aria-label": "Text", spellcheck: true }) as HTMLTextAreaElement;
     box.value = initial;
     // Drag the grip to move the box (and its text) anywhere on the page.
@@ -1248,10 +1366,18 @@ export function editTool(): HTMLElement {
       const [gx, gy] = [-22 * Math.cos(angle) + 2 * Math.sin(angle), -22 * Math.sin(angle) - 2 * Math.cos(angle)];
       grip.style.left = `${x * k + gx}px`;
       grip.style.top = `${y * k + gy}px`;
-      const lines = box.value.split("\n");
-      const widest = Math.max(...lines.map((l) => measure(l || " ", f)));
-      box.style.width = `${Math.max(40, (widest + 12) * k)}px`;
-      box.style.height = `${(lines.length * f.size * LINE_HEIGHT + 6) * k}px`;
+      if (block) {
+        // A paragraph: as wide as it was, wrapping as you type, as tall as its text.
+        box.style.width = `${block.width * k}px`;
+        box.style.lineHeight = String(block.leading / f.size);
+        box.style.height = "0px";
+        box.style.height = `${box.scrollHeight + 2}px`;
+      } else {
+        const lines = box.value.split("\n");
+        const widest = Math.max(...lines.map((l) => measure(l || " ", f)));
+        box.style.width = `${Math.max(40, (widest + 12) * k)}px`;
+        box.style.height = `${(lines.length * f.size * LINE_HEIGHT + 6) * k}px`;
+      }
       box.style.textAlign = f.align;
     };
     box.addEventListener("input", place);
@@ -1423,6 +1549,150 @@ export function editTool(): HTMLElement {
     if (active) {
       active.ink = detected.color;
       stage.closest(".page-editor")?.querySelector(".format-bar")?.dispatchEvent(new Event("sync"));
+    }
+  }
+
+  /** Edits a whole paragraph: one text box over it, and the text reflows into lines when you finish. */
+  function openParagraphBox(stage: HTMLElement, p: PageEdit, W: number, para: EditPara) {
+    const first = para.lines[0];
+    const group: { a: ReplaceAnn; i: number }[] = [];
+    p.annotations.forEach((a, i) => {
+      if (a.type === "replace" && a.para === para.key) group.push({ a, i });
+    });
+    const prev = group[0]?.a;
+    const detected: Fmt = { ...DEFAULT_FMT, family: first.font.family, bold: first.font.bold, italic: first.font.italic, size: first.size, color: first.color };
+    const f: Fmt = prev ? { ...detected, family: prev.font.family, bold: prev.font.bold, italic: prev.font.italic, size: prev.size, color: prev.color, underline: !!prev.underline, strike: !!prev.strike } : detected;
+    const original = paragraphText(para.lines);
+    const initial = group.length ? group.map((g) => g.a.text).filter(Boolean).join(" ") : original;
+    // Scans: start working out how the paragraph's lines look while the person types.
+    const looks = first.scanned && (matchScan || para.angle) ? para.lines.map((l) => lookOf(p.source, l)) : undefined;
+    looks?.forEach((l) => l.catch(() => undefined));
+    openBox(
+      stage,
+      W,
+      f,
+      initial,
+      () => {
+        const [dx, dy] = [-2, -f.size * 0.9 - 2];
+        const a = para.angle;
+        return [first.origin[0] + dx * Math.cos(a) - dy * Math.sin(a), first.origin[1] + dx * Math.sin(a) + dy * Math.cos(a)] as Point;
+      },
+      (text, f2, offset) => {
+        const moved = Math.abs(offset[0]) + Math.abs(offset[1]) > 0.1;
+        const unchanged = !group.length && text === original && JSON.stringify(f2) === JSON.stringify(detected) && !moved;
+        if (unchanged) return;
+        if (group.length && text === initial && !moved && JSON.stringify(f2) === JSON.stringify(f)) return;
+        void applyParagraph(p, para, group.map((g) => g.i), text, f2, detected, offset, looks);
+      },
+      false,
+      [0, 0],
+      para.angle,
+      { width: para.right - para.left + 6, leading: para.leading || first.size * LINE_HEIGHT },
+    );
+    if (active) {
+      active.ink = detected.color;
+      stage.closest(".page-editor")?.querySelector(".format-bar")?.dispatchEvent(new Event("sync"));
+    }
+  }
+
+  /** Reflows a paragraph's new text into lines and puts them where the old lines were. */
+  async function applyParagraph(p: PageEdit, para: EditPara, oldIdx: number[], text: string, f: Fmt, detected: Fmt, offset: Point, looks: ReturnType<typeof lookOf>[] | undefined) {
+    const lines = para.lines;
+    const first = lines[0];
+    const sameFace = f.family === first.font.family && f.bold === first.font.bold && f.italic === first.font.italic;
+    const place = (anns: ReplaceAnn[]) =>
+      commit(() => {
+        for (const i of [...oldIdx].sort((a, b) => b - a)) p.annotations.splice(i, 1);
+        p.annotations.push(...anns);
+      });
+    const maxWidth = para.right - para.left + 1.5;
+    const moveBy = (o: Point): Point => [o[0] + offset[0], o[1] + offset[1]];
+
+    if (!first.scanned) {
+      const width = (s: string) => measure(s || " ", f);
+      const laid = layoutParagraph(para, wrapText(text, maxWidth, width), width);
+      const anns: ReplaceAnn[] = [];
+      for (let j = 0; j < Math.max(lines.length, laid.length); j++) {
+        const old = lines[Math.min(j, lines.length - 1)];
+        const extra = j >= lines.length;
+        anns.push({
+          type: "replace",
+          rect: extra ? [0, 0, 0, 0] : old.bbox,
+          text: j < laid.length ? laid[j].text : "",
+          origin: j < laid.length ? moveBy(laid[j].origin) : old.origin,
+          size: f.size,
+          color: f.color,
+          font: { name: sameFace ? old.font.name : "", family: f.family, bold: f.bold, italic: f.italic },
+          underline: f.underline,
+          strike: f.strike,
+          para: para.key,
+        });
+      }
+      place(anns);
+      mascot.flash("happy", pick(["Sho! It reflowed nicely.", "Paragraph sorted, mfowethu.", "Smooth. Nobody will know."]), 2000);
+      return;
+    }
+
+    // A scan: every line is redrawn in the scan's look, with one font for the whole paragraph.
+    mascot.mood("work");
+    mascot.say("Reflowing the paragraph in the scan's look…");
+    try {
+      const results = await Promise.all(looks!);
+      const picture = results[0].picture;
+      let main = 0;
+      lines.forEach((l, i) => {
+        if ((l.scan?.words.length ?? 0) > (lines[main].scan?.words.length ?? 0)) main = i;
+      });
+      const primary = results[main].look;
+      const family = scanFont !== "auto" ? scanFont : undefined;
+      await picture.prepare(primary, family);
+      const sizeScale = f.size / detected.size;
+      const width = (s: string) => picture.textWidth(primary, s, family) * sizeScale;
+      const laid = layoutParagraph(para, wrapText(text, maxWidth, width), width);
+      const faceChanged = f.family !== detected.family || f.bold !== detected.bold || f.italic !== detected.italic;
+      const color = f.color.every((v, i) => Math.abs(v - detected.color[i]) < 0.01) ? undefined : f.color;
+      const anns: ReplaceAnn[] = [];
+      for (let j = 0; j < Math.max(lines.length, laid.length); j++) {
+        const idx = Math.min(j, lines.length - 1);
+        const old = lines[idx];
+        const extra = j >= lines.length;
+        const target = j < laid.length ? laid[j] : undefined;
+        const own = results[idx].look;
+        // Each line keeps its own paper and ink; the font fit is the paragraph's.
+        const look = { ...own, face: primary.face, px: primary.px, stretch: primary.stretch, shear: primary.shear, weight: primary.weight, sigma: primary.sigma, gain: primary.gain, noise: primary.noise, bilevel: primary.bilevel, hand: primary.hand, match: primary.match };
+        const dest = target ? moveBy(target.origin) : old.origin;
+        const shift: Point = [dest[0] - old.origin[0], dest[1] - old.origin[1]];
+        const painted = await picture.paint(scanLineOf(old), look, target?.text ?? "", {
+          sizeScale,
+          color,
+          style: faceChanged ? { generic: f.family, bold: f.bold, italic: f.italic } : undefined,
+          family,
+          underline: f.underline,
+          strike: f.strike,
+          offset: shift,
+          noErase: extra,
+        });
+        const id = `scan-${++pictureCount}`;
+        pictures.set(id, { png: painted.png, url: URL.createObjectURL(new Blob([painted.png as BlobPart], { type: "image/png" })) });
+        anns.push({
+          type: "replace",
+          rect: extra ? [0, 0, 0, 0] : old.bbox,
+          text: target?.text ?? "",
+          origin: old.origin,
+          size: f.size,
+          color: f.color,
+          font: { name: "", family: f.family, bold: f.bold, italic: f.italic },
+          underline: f.underline,
+          strike: f.strike,
+          para: para.key,
+          scan: { patch: id, box: painted.box, ...(picture.inPlace ? { at: [painted.x, painted.y] as [number, number], scanSize: [picture.width, picture.height] as [number, number] } : {}), words: painted.words },
+        });
+      }
+      if (!pages.includes(p)) return;
+      place(anns);
+      mascot.flash("happy", `Sho! ${plural(laid.length, "line")} reflowed in the scan's look.`, 3000);
+    } catch {
+      mascot.flash("eish", "Eish, I couldn't reflow that paragraph. Try again, or edit it line by line.", 3600);
     }
   }
 
@@ -1611,6 +1881,7 @@ export function editTool(): HTMLElement {
     scanWords.clear();
     scannedSources.clear();
     scanRenders.clear();
+    scanRules.clear();
     scanPictures.clear();
     scanTurns.clear();
     scanFont = "auto";

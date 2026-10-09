@@ -216,52 +216,63 @@ export function hash(s: string): number {
 }
 
 /**
- * Fills the masked pixels of an RGBA image with paper borrowed from just above
- * and below each gap (in nearby columns), so the grain and shading carry on.
- * `ink` marks pixels that must not be borrowed (other text).
+ * Fills the masked pixels of an RGBA image with the paper around them: each gap is
+ * filled inward from its clean edge (averaging the nearest clean pixels, so paper
+ * shading carries across), never from `ink` (other writing and its soft edge), and
+ * then the paper's own grain is added back so the patch doesn't look smooth.
  */
 export function fillPaper(rgba: Uint8ClampedArray, w: number, h: number, mask: Uint8Array, ink: Uint8Array, rand: () => number, fallback: [number, number, number], fallbackSd: number): void {
-  // Each masked pixel's gap in its column.
-  const top = new Int32Array(w * h);
-  const bottom = new Int32Array(w * h);
-  for (let x = 0; x < w; x++) {
-    let y = 0;
-    while (y < h) {
-      if (!mask[y * w + x]) {
-        y++;
-        continue;
-      }
-      const start = y;
-      while (y < h && mask[y * w + x]) y++;
-      for (let k = start; k < y; k++) {
-        top[k * w + x] = start;
-        bottom[k * w + x] = y - 1;
-      }
-    }
-  }
-  const usable = (x: number, y: number) => x >= 0 && y >= 0 && x < w && y < h && !mask[y * w + x] && !ink[y * w + x];
-  const src = rgba.slice();
+  const known = new Uint8Array(w * h);
+  const todo: number[] = [];
   for (let i = 0; i < w * h; i++) {
-    if (!mask[i]) continue;
-    const x = i % w;
-    let done = false;
-    for (let tries = 0; tries < 24 && !done; tries++) {
-      const dx = Math.round((rand() - 0.5) * 12);
-      const dy = 1 + Math.floor(rand() * 6);
-      const above = rand() < 0.5;
-      const sx = x + dx;
-      const sy = above ? top[i] - dy : bottom[i] + dy;
-      if (!usable(sx, sy)) continue;
-      const j = (sy * w + sx) * 4;
-      rgba[i * 4] = src[j];
-      rgba[i * 4 + 1] = src[j + 1];
-      rgba[i * 4 + 2] = src[j + 2];
-      done = true;
+    if (mask[i]) todo.push(i);
+    else known[i] = ink[i] ? 0 : 1;
+  }
+  let remaining = todo;
+  for (let pass = 0; pass < 400 && remaining.length; pass++) {
+    const next: number[] = [];
+    const assigned: number[] = [];
+    const values: number[] = [];
+    for (const i of remaining) {
+      const x = i % w;
+      const y = (i - x) / w;
+      let n = 0;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const j = ny * w + nx;
+          if (!known[j]) continue;
+          n++;
+          r += rgba[j * 4];
+          g += rgba[j * 4 + 1];
+          b += rgba[j * 4 + 2];
+        }
+      }
+      if (n) {
+        assigned.push(i);
+        values.push(r / n, g / n, b / n);
+      } else next.push(i);
     }
-    if (!done) {
-      const n = gaussian(rand) * fallbackSd;
-      for (let k = 0; k < 3; k++) rgba[i * 4 + k] = fallback[k] + n;
-    }
+    if (!assigned.length) break;
+    assigned.forEach((i, k) => {
+      rgba[i * 4] = values[k * 3];
+      rgba[i * 4 + 1] = values[k * 3 + 1];
+      rgba[i * 4 + 2] = values[k * 3 + 2];
+      known[i] = 1;
+    });
+    remaining = next;
+  }
+  // Nothing clean to start from: the plain paper colour.
+  for (const i of remaining) rgba.set(fallback, i * 4);
+  for (const i of todo) {
+    const noise = gaussian(rand) * fallbackSd;
+    for (let k = 0; k < 3; k++) rgba[i * 4 + k] += noise;
   }
 }
 
@@ -273,28 +284,37 @@ export function fillPaper(rgba: Uint8ClampedArray, w: number, h: number, mask: U
 export function findRules(ink: Plane, minRun: number, grow = 1, threshold = 0.45): Uint8Array {
   const { w, h, data } = ink;
   const mark = new Uint8Array(w * h);
-  for (let y = 0; y < h; y++) {
-    let x = 0;
-    while (x < w) {
-      if (data[y * w + x] <= threshold) {
-        x++;
-        continue;
-      }
-      const start = x;
-      while (x < w && data[y * w + x] > threshold) x++;
-      if (x - start >= minRun) for (let k = start; k < x; k++) mark[y * w + k] = 1;
+  const on = (x: number, y: number) => x >= 0 && y >= 0 && x < w && y < h && data[y * w + x] > threshold;
+  // Follows a line that may drift by a pixel from one step to the next (a scan that isn't quite straight).
+  const follow = (x0: number, y0: number, horizontal: boolean) => {
+    const path: number[] = [];
+    let [x, y] = [x0, y0];
+    for (;;) {
+      path.push(y * w + x);
+      const [nx, ny] = horizontal ? [x + 1, y] : [x, y + 1];
+      const options = horizontal ? [[nx, ny], [nx, ny - 1], [nx, ny + 1]] : [[nx, ny], [nx - 1, ny], [nx + 1, ny]];
+      const next = options.find(([a, b]) => on(a, b));
+      if (!next) break;
+      [x, y] = next;
     }
-  }
-  for (let x = 0; x < w; x++) {
-    let y = 0;
-    while (y < h) {
-      if (data[y * w + x] <= threshold) {
-        y++;
-        continue;
+    return path;
+  };
+  const seenH = new Uint8Array(w * h);
+  const seenV = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (data[i] <= threshold) continue;
+      if (!seenH[i]) {
+        const path = follow(x, y, true);
+        for (const j of path) seenH[j] = 1;
+        if (path.length >= minRun) for (const j of path) mark[j] = 1;
       }
-      const start = y;
-      while (y < h && data[y * w + x] > threshold) y++;
-      if (y - start >= minRun) for (let k = start; k < y; k++) mark[k * w + x] = 1;
+      if (!seenV[i]) {
+        const path = follow(x, y, false);
+        for (const j of path) seenV[j] = 1;
+        if (path.length >= minRun) for (const j of path) mark[j] = 1;
+      }
     }
   }
   return dilate(mark, w, h, grow);

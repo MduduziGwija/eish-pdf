@@ -111,7 +111,9 @@ export function formatBar(get: () => Fmt, changed: () => void, opts: { align: bo
     toggle("underline", "Underline (Ctrl+U)", "U", "u"),
     toggle("strike", "Strikethrough", "S", "s"),
   ];
-  const swatches = SWATCHES.map((s) => h("button.swatch", { type: "button", title: s.name, "aria-label": s.name, style: `--swatch:${rgbCss(s.rgb)}`, "data-rgb": s.rgb.join(",") }));
+  // The first few colours show; the rest (and recent ones) open with the "more" button.
+  const swatches = SWATCHES.map((s, i) => h(`button.swatch${i >= 7 ? ".extra" : ""}`, { type: "button", title: s.name, "aria-label": s.name, style: `--swatch:${rgbCss(s.rgb)}`, "data-rgb": s.rgb.join(",") }));
+  const more = h("button.fmt-btn.more-colours", { type: "button", title: "More colours", "aria-label": "More colours", "aria-expanded": "false", "data-more": "1" }, "⋯");
   const picker = h("input.fmt-picker", { type: "color", title: "More colours", "aria-label": "Custom colour" });
   // The document's own ink, so a changed colour can always go back to it.
   const docInk = h("button.swatch.doc-ink", { type: "button", title: "The document's own ink colour", "aria-label": "Document's own ink", hidden: true });
@@ -135,7 +137,7 @@ export function formatBar(get: () => Fmt, changed: () => void, opts: { align: bo
       h("button.fmt-btn", { type: "button", title: "Bigger", "aria-label": "Bigger text", "data-step": "1" }, "A+"),
     ),
     h("div.fmt-group", {}, ...toggles),
-    h("div.fmt-group.fmt-colours", {}, docInk, ...swatches, picker, pipette, recent),
+    h("div.fmt-group.fmt-colours", {}, docInk, ...swatches, more, picker, pipette, recent),
     opts.align && h("div.fmt-group", {}, ...aligns),
   );
 
@@ -153,6 +155,10 @@ export function formatBar(get: () => Fmt, changed: () => void, opts: { align: bo
       fmt[key] = !fmt[key];
     } else if (btn.dataset.step) {
       fmt.size = clampSize(fmt.size + Number(btn.dataset.step) * (fmt.size >= 24 ? 2 : 1));
+    } else if (btn.dataset.more) {
+      const open = el.querySelector(".fmt-colours")!.classList.toggle("expanded");
+      btn.setAttribute("aria-expanded", String(open));
+      return;
     } else if (btn.dataset.pick) {
       // The browser's eyedropper (Chrome, Edge): click anywhere on screen to copy that colour.
       void new dropper!().open().then(
@@ -210,7 +216,7 @@ export function formatBar(get: () => Fmt, changed: () => void, opts: { align: bo
     }
     recent.replaceChildren(
       ...recentColours().map((c) => {
-        const b = h("button.swatch", { type: "button", title: `Recent: ${toHex(c)}`, "aria-label": `Recent colour ${toHex(c)}`, style: `--swatch:${rgbCss(c)}` });
+        const b = h("button.swatch.extra", { type: "button", title: `Recent: ${toHex(c)}`, "aria-label": `Recent colour ${toHex(c)}`, style: `--swatch:${rgbCss(c)}` });
         b.dataset.rgb = c.join(",");
         b.setAttribute("aria-pressed", String(sameRgb(c, fmt.color)));
         return b;

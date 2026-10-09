@@ -101,6 +101,8 @@ export interface PaintOptions {
   offset?: [number, number];
   /** Boxes of other lines' words (the frame's points), which unread-ink clean-up must leave alone. */
   avoid?: Box[];
+  /** Paint without wiping the old line: the text is a new line (below a paragraph) placed with `offset`. */
+  noErase?: boolean;
 }
 
 /** A redrawn piece of scan: pixels in the scan picture's own frame, and where it sits on the page. */
@@ -314,7 +316,7 @@ class Frame {
       for (let i = 0; i < this.width * this.height; i += 37) sample.push(0.299 * this.rgba[i * 4] + 0.587 * this.rgba[i * 4 + 1] + 0.114 * this.rgba[i * 4 + 2]);
       sample.sort((a, b) => a - b);
       const [paperLum, inkLum] = [sample[Math.floor(sample.length * 0.85)] ?? 255, sample[Math.floor(sample.length * 0.02)] ?? 0];
-      this.frameRules = findRules(this.coverage([0, 0, this.width, this.height], paperLum, inkLum), Math.max(8, 28 / this.matrix[0]), 1);
+      this.frameRules = findRules(this.coverage([0, 0, this.width, this.height], paperLum, inkLum), Math.max(8, 28 / this.matrix[0]), 1, 0.18);
     }
     const [x0, y0, x1, y1] = [Math.max(0, box[0] - 2), Math.max(0, box[1] - 2), Math.min(this.width, box[2] + 2), Math.min(this.height, box[3] + 2)];
     for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (this.frameRules[y * this.width + x]) return true;
@@ -325,7 +327,7 @@ class Frame {
   rulesIn(box: Box, sizePx: number, paperLum: number, inkLum: number): Uint8Array {
     const m = Math.ceil(sizePx * 2.4);
     const big: Box = [Math.max(0, box[0] - m), Math.max(0, box[1] - m), Math.min(this.width, box[2] + m), Math.min(this.height, box[3] + m)];
-    const rules = findRules(this.coverage(big, paperLum, inkLum), Math.max(6, sizePx * 2.2), 1);
+    const rules = findRules(this.coverage(big, paperLum, inkLum), Math.max(6, sizePx * 2.2), 1, 0.18);
     const [w, h, bw] = [box[2] - box[0], box[3] - box[1], big[2] - big[0]];
     const out = new Uint8Array(w * h);
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) out[y * w + x] = rules[(y + box[1] - big[1]) * bw + x + box[0] - big[0]];
@@ -838,18 +840,22 @@ class Frame {
     // Cover the old words with paper (only inside the words' own boxes).
     const old = new Uint8Array(w * h);
     const inkMask = new Uint8Array(w * h);
+    const halo = new Uint8Array(w * h);
     for (let y = 0; y < h; y++) {
       for (let xx = 0; xx < w; xx++) {
         const i = y * w + xx;
         const inked = cover.data[i] > 0.12;
         inkMask[i] = inked ? 1 : 0;
-        if (inked && inWords(xx + x0, y + y0)) old[i] = 1;
+        // The old words' whole area goes (not just the ink: the faint halo a JPEG leaves around letters would show as a ghost).
+        if (inWords(xx + x0, y + y0)) old[i] = 1;
+        // Pixels not to learn the paper from: ink and its soft edge.
+        halo[i] = cover.data[i] > 0.04 ? 1 : 0;
       }
     }
     // OCR sometimes skips words (messy handwriting especially). Old ink on this
     // line that the new text would land on goes too, whole blobs at a time, so
     // nothing old shows through or under the new words.
-    {
+    if (!opts.noErase) {
       const solid = new Uint8Array(w * h);
       for (let i = 0; i < w * h; i++) solid[i] = cover.data[i] > 0.45 ? 1 : 0;
       const { labels, list } = components(solid, w, h);
@@ -895,9 +901,10 @@ class Frame {
       }
     }
     // The soft edge of the old letters goes too, but not neighbouring ink.
+    if (opts.noErase) old.fill(0);
     const erase = dilate(old, w, h, Math.ceil(sigma + 1));
     for (let i = 0; i < erase.length; i++) if (erase[i] && inkMask[i] && !old[i]) erase[i] = 0;
-    fillPaper(rgba, w, h, erase, inkMask, rand, look.paper, look.paperSd);
+    fillPaper(rgba, w, h, erase, halo, rand, look.paper, look.paperSd);
     // Table rules that ran through the words stay as they were.
     for (let i = 0; i < rules.length; i++) if (rules[i] && erase[i]) rgba.set(original.subarray(i * 4, i * 4 + 4), i * 4);
 
@@ -934,8 +941,8 @@ class Frame {
       // The paper underneath already has grain; give the new ink its share.
       const grain = a > 0.01 && look.noise > 0 ? a * look.noise * gaussian(rand) : 0;
       for (let k = 0; k < 3; k++) rgba[i * 4 + k] = rgba[i * 4 + k] * (1 - a) + colour[k] * a + grain;
-      // Unchanged pixels stay see-through, so neighbouring edits don't overwrite each other.
-      rgba[i * 4 + 3] = !this.inPlace || erase[i] || a > 0.003 ? 255 : 0;
+      // Unchanged pixels stay see-through, so neighbouring patches (the lines of a paragraph) don't overwrite each other.
+      rgba[i * 4 + 3] = erase[i] || a > 0.003 ? 255 : 0;
     }
 
     const png = await toPng(rgba, w, h);
@@ -1124,6 +1131,21 @@ export class ScanPicture {
       this.looks.set(key, found);
     }
     return found;
+  }
+
+  /** Gets the font for a look ready (downloads it if needed), so `textWidth` can answer at once. */
+  async prepare(look: LineLook, family?: string): Promise<void> {
+    await loadFace(this.faceFor(look, family));
+  }
+
+  private faceFor(look: LineLook, family?: string): Face {
+    const chosen = family ? familyByCss(family) : undefined;
+    return chosen ? { family: chosen, bold: look.face.bold, italic: look.face.italic } : look.face;
+  }
+
+  /** How wide `text` comes out in the line's look, in points (for wrapping a paragraph). Call `prepare` first. */
+  textWidth(look: LineLook, text: string, family?: string): number {
+    return measure(this.faceFor(look, family), look.px, text).width * look.stretch * this.upright.matrix[0];
   }
 
   /** Paints `text` over the line in the line's look, and returns it in the scan picture's own pixels. */

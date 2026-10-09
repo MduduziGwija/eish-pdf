@@ -1415,8 +1415,8 @@ button.thumb:not(:disabled):hover {
 .tool-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
+  gap: 5px;
+  padding: 7px 10px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--surface);
@@ -2636,4 +2636,59 @@ del {
 }
 .ann-cover .cover-fill {
   stroke: none;
+}
+
+/* Paragraph outlines in Edit text. */
+.page-layer[data-tool="retext"] .line-box.multi {
+  stroke: color-mix(in srgb, var(--accent) 55%, transparent);
+  stroke-width: 0.9;
+}
+.edit-by {
+  margin-right: 4px;
+}
+
+/* A toolbar that stays out of the way: scan options fold away, extra colours open on request. */
+details.scan-options[open] {
+  flex-basis: 100%;
+}
+details.scan-options > summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+  list-style: none;
+  user-select: none;
+}
+details.scan-options > summary::before {
+  content: "⚙ ";
+}
+details.scan-options[open] > summary {
+  margin-bottom: 6px;
+}
+details.scan-options[hidden] {
+  display: none;
+}
+.fmt-colours:not(.expanded) .swatch.extra {
+  display: none;
+}
+.fmt-colours.expanded {
+  max-width: 560px;
+}
+.more-colours {
+  min-width: 28px;
+}
+.editor-bar {
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.fmt-btn.wide {
+  width: auto;
+  padding: 0 12px;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+.edit-by {
+  display: inline-flex;
+  gap: 2px;
 }
