@@ -67,6 +67,8 @@ export const pdf = {
     call<Uint8Array>({ op: "render", session, page, scale, rotate }),
   close: (session: number) => call<null>({ op: "close", session }),
   lines: (session: number, page: number) => call<TextLine[]>({ op: "lines", session, page }),
+  /** Pictures on the page (logos, letterheads), as boxes in page space. */
+  pictures: (session: number, page: number) => call<[number, number, number, number][]>({ op: "pictures", session, page }),
   /** The page's scan picture and where its pixels sit, or null if it isn't a simple scan. */
   scanImage: (session: number, page: number) => call<ScanImage | null>({ op: "scanImage", session, page }),
   hasText: (session: number, page: number) => call<boolean>({ op: "hasText", session, page }),

@@ -25,13 +25,45 @@ export const FAMILIES: { id: Family; label: string; css: string }[] = [
   { id: "mono", label: "Mono (Courier)", css: "'Courier New', Courier, 'Liberation Mono', monospace" },
 ];
 
+const rgb255 = (r: number, g: number, b: number): Rgb => [r / 255, g / 255, b / 255];
+
 export const SWATCHES: { name: string; rgb: Rgb }[] = [
   { name: "Black", rgb: [0.07, 0.07, 0.09] },
-  { name: "Blue", rgb: [0, 0.137, 0.584] },
-  { name: "Red", rgb: [0.871, 0.22, 0.192] },
-  { name: "Green", rgb: [0, 0.478, 0.302] },
+  { name: "Charcoal", rgb: rgb255(64, 64, 70) },
   { name: "Grey", rgb: [0.45, 0.45, 0.48] },
+  { name: "Navy", rgb: rgb255(10, 30, 100) },
+  { name: "Blue", rgb: [0, 0.137, 0.584] },
+  { name: "Sky blue", rgb: rgb255(40, 130, 220) },
+  { name: "Teal", rgb: rgb255(0, 128, 128) },
+  { name: "Green", rgb: [0, 0.478, 0.302] },
+  { name: "Olive", rgb: rgb255(110, 120, 20) },
+  { name: "Gold", rgb: rgb255(200, 150, 0) },
+  { name: "Orange", rgb: rgb255(230, 110, 0) },
+  { name: "Red", rgb: [0.871, 0.22, 0.192] },
+  { name: "Maroon", rgb: rgb255(128, 20, 40) },
+  { name: "Pink", rgb: rgb255(220, 60, 140) },
+  { name: "Purple", rgb: rgb255(110, 50, 160) },
+  { name: "Brown", rgb: rgb255(110, 70, 40) },
+  { name: "White", rgb: [1, 1, 1] },
 ];
+
+const RECENT_KEY = "eish-recent-colours";
+function recentColours(): Rgb[] {
+  try {
+    const list = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]") as Rgb[];
+    return list.filter((c) => Array.isArray(c) && c.length === 3).slice(0, 6);
+  } catch {
+    return [];
+  }
+}
+function rememberColour(c: Rgb) {
+  try {
+    const list = [c, ...recentColours().filter((x) => !x.every((v, i) => Math.abs(v - c[i]) < 0.01))].slice(0, 6);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list));
+  } catch {
+    // Not remembered, that's fine.
+  }
+}
 
 export const rgbCss = ([r, g, b]: Rgb) => `rgb(${Math.round(r * 255)} ${Math.round(g * 255)} ${Math.round(b * 255)})`;
 const toHex = (c: Rgb) => "#" + c.map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("");
@@ -67,7 +99,7 @@ export interface FormatBar {
  * Builds the bar. `get` returns the format being edited (the open text box's,
  * or the defaults for the next one); `changed` is called after every change.
  */
-export function formatBar(get: () => Fmt, changed: () => void, opts: { align: boolean }): FormatBar {
+export function formatBar(get: () => Fmt, changed: () => void, opts: { align: boolean; /** The ink colour of the document text being edited, when there is one. */ ink?: () => Rgb | undefined }): FormatBar {
   const family = h("select.input.small.fmt-family", { "aria-label": "Font" });
   for (const f of FAMILIES) family.append(h("option", { value: f.id }, f.label));
   const size = h("input.input.small.fmt-size", { type: "number", min: 4, max: 144, step: 1, "aria-label": "Font size" });
@@ -81,6 +113,11 @@ export function formatBar(get: () => Fmt, changed: () => void, opts: { align: bo
   ];
   const swatches = SWATCHES.map((s) => h("button.swatch", { type: "button", title: s.name, "aria-label": s.name, style: `--swatch:${rgbCss(s.rgb)}`, "data-rgb": s.rgb.join(",") }));
   const picker = h("input.fmt-picker", { type: "color", title: "More colours", "aria-label": "Custom colour" });
+  // The document's own ink, so a changed colour can always go back to it.
+  const docInk = h("button.swatch.doc-ink", { type: "button", title: "The document's own ink colour", "aria-label": "Document's own ink", hidden: true });
+  const recent = h("span.recent-colours");
+  const dropper = (window as unknown as { EyeDropper?: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper;
+  const pipette = dropper ? h("button.fmt-btn", { type: "button", title: "Pick a colour from anywhere on screen (to copy the ink of a stamp or signature)", "aria-label": "Pick a colour from the screen", "data-pick": "1" }, "💧") : undefined;
   const aligns = (["left", "center", "right"] as Align[]).map((a) => {
     const b = h("button.fmt-btn", { type: "button", title: `Align ${a}`, "aria-label": `Align ${a}`, "data-align": a }, svg(ALIGN_ICON[a]));
     return b;
@@ -98,7 +135,7 @@ export function formatBar(get: () => Fmt, changed: () => void, opts: { align: bo
       h("button.fmt-btn", { type: "button", title: "Bigger", "aria-label": "Bigger text", "data-step": "1" }, "A+"),
     ),
     h("div.fmt-group", {}, ...toggles),
-    h("div.fmt-group", {}, ...swatches, picker),
+    h("div.fmt-group.fmt-colours", {}, docInk, ...swatches, picker, pipette, recent),
     opts.align && h("div.fmt-group", {}, ...aligns),
   );
 
@@ -116,6 +153,18 @@ export function formatBar(get: () => Fmt, changed: () => void, opts: { align: bo
       fmt[key] = !fmt[key];
     } else if (btn.dataset.step) {
       fmt.size = clampSize(fmt.size + Number(btn.dataset.step) * (fmt.size >= 24 ? 2 : 1));
+    } else if (btn.dataset.pick) {
+      // The browser's eyedropper (Chrome, Edge): click anywhere on screen to copy that colour.
+      void new dropper!().open().then(
+        ({ sRGBHex }) => {
+          get().color = fromHex(sRGBHex);
+          rememberColour(get().color);
+          sync();
+          changed();
+        },
+        () => undefined,
+      );
+      return;
     } else if (btn.dataset.rgb) {
       fmt.color = btn.dataset.rgb.split(",").map(Number) as Rgb;
     } else if (btn.dataset.align) {
@@ -140,6 +189,10 @@ export function formatBar(get: () => Fmt, changed: () => void, opts: { align: bo
     sync();
     changed();
   });
+  picker.addEventListener("change", () => {
+    rememberColour(fromHex(picker.value));
+    sync();
+  });
 
   function sync() {
     const fmt = get();
@@ -148,6 +201,21 @@ export function formatBar(get: () => Fmt, changed: () => void, opts: { align: bo
     for (const t of toggles) t.setAttribute("aria-pressed", String(fmt[t.dataset.key as "bold"]));
     for (const s of swatches) s.setAttribute("aria-pressed", String(sameRgb(s.dataset.rgb!.split(",").map(Number) as Rgb, fmt.color)));
     picker.value = toHex(fmt.color);
+    const ink = opts.ink?.();
+    docInk.hidden = !ink;
+    if (ink) {
+      docInk.style.setProperty("--swatch", rgbCss(ink));
+      docInk.dataset.rgb = ink.join(",");
+      docInk.setAttribute("aria-pressed", String(sameRgb(ink, fmt.color)));
+    }
+    recent.replaceChildren(
+      ...recentColours().map((c) => {
+        const b = h("button.swatch", { type: "button", title: `Recent: ${toHex(c)}`, "aria-label": `Recent colour ${toHex(c)}`, style: `--swatch:${rgbCss(c)}` });
+        b.dataset.rgb = c.join(",");
+        b.setAttribute("aria-pressed", String(sameRgb(c, fmt.color)));
+        return b;
+      }),
+    );
     for (const a of aligns) a.setAttribute("aria-pressed", String(a.dataset.align === fmt.align));
   }
   sync();

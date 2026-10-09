@@ -185,6 +185,8 @@ export type Annotation =
   | { type: "ink"; strokes: [number, number][][]; width: number; color: Rgb }
   | { type: "highlight"; rect: Box; color: Rgb }
   | { type: "erase"; rect: Box }
+  /** Covers an area with a flat colour (what's left behind when something is lifted off the page). `remove` also deletes what's under it. */
+  | { type: "cover"; rect: Box; color: Rgb; remove?: boolean }
   /** A picture (or signature) stretched to `rect`; `image` keys into the images passed to edit(). */
   | { type: "image"; rect: Box; image: string; signature?: boolean }
   /** Swaps an existing line of text for new text in the same style and place. */
@@ -392,10 +394,23 @@ function drawImages(pdf: mupdf.PDFDocument, index: number, page: mupdf.PDFPage, 
 
 function applyAnnotations(pdf: mupdf.PDFDocument, index: number, page: mupdf.PDFPage, annotations: Annotation[], images: ImageStore = {}, refs = new Map<string, mupdf.PDFObject>()) {
   const erases = annotations.filter((a) => a.type === "erase");
-  if (erases.length) {
-    for (const a of erases) page.createAnnotation("Redact").setRect(normalise(a.rect));
+  const covers = annotations.filter((a): a is Extract<Annotation, { type: "cover" }> => a.type === "cover");
+  const removed = covers.filter((a) => a.remove);
+  if (erases.length || removed.length) {
+    for (const a of [...erases, ...removed]) page.createAnnotation("Redact").setRect(normalise(a.rect));
     // Really removes text, images (pixels) and covered line art under each box.
     page.applyRedactions(false, 2, 1, 0);
+  }
+  if (covers.length) {
+    const map = toUserSpace(page);
+    let ops = "";
+    for (const a of covers) {
+      const [x0, y0, x1, y1] = normalise(a.rect);
+      const p0 = map.point([x0, y0]);
+      const p1 = map.point([x1, y1]);
+      ops += `${a.color.map((v) => v.toFixed(3)).join(" ")} rg ${Math.min(p0[0], p1[0]).toFixed(2)} ${Math.min(p0[1], p1[1]).toFixed(2)} ${Math.abs(p1[0] - p0[0]).toFixed(2)} ${Math.abs(p1[1] - p0[1]).toFixed(2)} re f\n`;
+    }
+    appendContent(pdf, pdf.findPage(index), ops);
   }
   const placed = annotations.filter((a): a is Extract<Annotation, { type: "image" }> => a.type === "image");
   if (placed.length) drawImages(pdf, index, page, placed, images, refs);

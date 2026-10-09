@@ -222,3 +222,34 @@ function copyDictionary(pdf: mupdf.PDFDocument, dict: mupdf.PDFObject): mupdf.PD
   dict.forEach((value, key) => out.put(String(key), value));
   return out;
 }
+
+/** Pictures drawn on a page (logos, letterheads, photos), as boxes in page space. The big picture of a scan, and text masks, are left out. */
+export function pagePictures(pdf: mupdf.PDFDocument, index: number): [number, number, number, number][] {
+  const page = pdf.loadPage(index);
+  const found: [number, number, number, number][] = [];
+  try {
+    const [x0, y0, x1, y1] = page.getBounds();
+    const pageArea = (x1 - x0) * (y1 - y0);
+    page.run(
+      new mupdf.Device({
+        fillImage(_image, ctm) {
+          const corners: [number, number][] = [
+            [ctm[4], ctm[5]],
+            [ctm[0] + ctm[4], ctm[1] + ctm[5]],
+            [ctm[2] + ctm[4], ctm[3] + ctm[5]],
+            [ctm[0] + ctm[2] + ctm[4], ctm[1] + ctm[3] + ctm[5]],
+          ];
+          const xs = corners.map((c) => c[0]);
+          const ys = corners.map((c) => c[1]);
+          const box: [number, number, number, number] = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+          const area = (box[2] - box[0]) * (box[3] - box[1]);
+          if (area >= pageArea * 0.02 * 0.1 && area < pageArea * 0.6 && box[2] - box[0] > 8 && box[3] - box[1] > 8) found.push(box);
+        },
+      }),
+      mupdf.Matrix.identity,
+    );
+  } finally {
+    page.destroy();
+  }
+  return found;
+}

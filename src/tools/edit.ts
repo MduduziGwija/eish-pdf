@@ -16,7 +16,7 @@ import { DEFAULT_FMT, familyCss, formatBar, rgbCss, styleElement, SWATCHES, type
 import { openSignatureDialog, type Picture } from "./signature";
 import { openCertificateDialog, type CertSettings } from "../sign/dialog";
 
-type Tool = "retext" | "text" | "draw" | "image" | "sign" | "highlight" | "erase" | "select";
+type Tool = "retext" | "text" | "draw" | "image" | "sign" | "highlight" | "erase" | "lift" | "select";
 type Point = [number, number];
 type Box = [number, number, number, number];
 type TextAnn = Extract<Annotation, { type: "text" }>;
@@ -44,6 +44,8 @@ interface Doc {
 /** The text box currently open for typing. */
 interface Active {
   fmt: Fmt;
+  /** The ink colour of the document text being edited (so the colour can go back to it). */
+  ink?: Rgb;
   finish: (save: boolean) => void;
   place: () => void;
 }
@@ -60,6 +62,7 @@ const TOOLS: { id: Tool; label: string; hint: string; glyph: string }[] = [
   { id: "sign", label: "Sign", hint: "Draw, type or upload your signature, then place and resize it", glyph: "✍" },
   { id: "highlight", label: "Highlight", hint: "Drag over what matters", glyph: "▰" },
   { id: "erase", label: "Erase", hint: "Drag over content to remove it for real", glyph: "⌫" },
+  { id: "lift", label: "Move area", hint: "Click a picture, or drag a box around a letterhead, logo or any part of the page, to lift it. Then drag it where you want it, or pull a corner to resize.", glyph: "✥" },
   { id: "select", label: "Select", hint: "Click an edit to select it, then drag it (or use the arrow keys) to move it. Pull a picture's corner to resize. Delete removes.", glyph: "➚" },
 ];
 
@@ -573,6 +576,10 @@ export function editTool(): HTMLElement {
         im.setAttribute("height", String(y1 - y0));
         im.setAttribute("preserveAspectRatio", "none");
         g.append(im);
+      } else if (a.type === "cover") {
+        const fill = rect(a.rect, "cover-fill");
+        fill.style.fill = rgbCss(a.color);
+        g.append(fill);
       } else if (a.type === "replace" && a.scan) {
         const im = document.createElementNS(SVG_NS, "image");
         const [x0, y0, x1, y1] = a.scan.box;
@@ -794,7 +801,7 @@ export function editTool(): HTMLElement {
                 active.place();
               }
             },
-            { align: tool === "text" },
+            { align: tool === "text", ink: () => active?.ink },
           )
         : undefined;
     const penSwatches = h("div.swatches", { role: "group", "aria-label": "Pen colour" });
@@ -885,6 +892,21 @@ export function editTool(): HTMLElement {
         .catch(() => oops("Couldn't read the text on this page."));
     }
 
+    // Move area: outline the pictures on the page so they can be clicked.
+    if (tool === "lift" && p.rotate === 0) {
+      void pdf
+        .pictures(doc!.session, p.source)
+        .then((boxes) => {
+          if (!stage.isConnected) return;
+          for (const b of boxes) {
+            const r = rect(b, "pic-box");
+            r.dataset.box = b.join(",");
+            linesLayer.append(r);
+          }
+        })
+        .catch(() => undefined);
+    }
+
     wireStage(stage, layer, p, W, H);
 
     const nav = h(
@@ -923,6 +945,66 @@ export function editTool(): HTMLElement {
     selected = undefined;
     view = { kind: "page", index };
     render();
+  }
+
+  /**
+   * Lifts part of the page off as a picture (a letterhead, logo, stamp...): the spot it
+   * came from is covered with the paper around it, and the piece is selected so it can be dragged.
+   */
+  async function liftArea(p: PageEdit, r: Box) {
+    if (!doc) return;
+    const scale = 3;
+    try {
+      mascot.say("Lifting it off the page…");
+      const png = await pdf.render(doc.session, p.source, scale, p.rotate);
+      const bitmap = await createImageBitmap(new Blob([png as BlobPart], { type: "image/png" }));
+      const [x0, y0, x1, y1] = r.map((v) => Math.round(v * scale));
+      const [w, hgt] = [Math.max(1, Math.min(bitmap.width, x1) - Math.max(0, x0)), Math.max(1, Math.min(bitmap.height, y1) - Math.max(0, y0))];
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = hgt;
+      c.getContext("2d")!.drawImage(bitmap, Math.max(0, x0), Math.max(0, y0), w, hgt, 0, 0, w, hgt);
+      // The paper around it: the middle colour of a thin ring just outside the box.
+      const ring = Math.round(4 * scale);
+      const [rx0, ry0] = [Math.max(0, x0 - ring), Math.max(0, y0 - ring)];
+      const [rw, rh] = [Math.min(bitmap.width, x1 + ring) - rx0, Math.min(bitmap.height, y1 + ring) - ry0];
+      const ctx = document.createElement("canvas");
+      ctx.width = rw;
+      ctx.height = rh;
+      const rc = ctx.getContext("2d", { willReadFrequently: true })!;
+      rc.drawImage(bitmap, rx0, ry0, rw, rh, 0, 0, rw, rh);
+      const data = rc.getImageData(0, 0, rw, rh).data;
+      const reds: number[] = [];
+      const greens: number[] = [];
+      const blues: number[] = [];
+      for (let y = 0; y < rh; y++) {
+        for (let x = 0; x < rw; x++) {
+          const [gx, gy] = [x + rx0, y + ry0];
+          if (gx >= x0 && gx < x1 && gy >= y0 && gy < y1) continue;
+          const i = (y * rw + x) * 4;
+          reds.push(data[i]);
+          greens.push(data[i + 1]);
+          blues.push(data[i + 2]);
+        }
+      }
+      bitmap.close();
+      const middle = (xs: number[]) => (xs.length ? xs.sort((a, b) => a - b)[Math.floor(xs.length / 2)] / 255 : 1);
+      const color: Rgb = [middle(reds), middle(greens), middle(blues)];
+      const blob = await new Promise<Blob | null>((resolve) => c.toBlob(resolve, "image/png"));
+      if (!blob) throw new Error("Couldn't lift that.");
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const id = `pic-${++pictureCount}`;
+      pictures.set(id, { png: bytes, url: URL.createObjectURL(new Blob([bytes as BlobPart], { type: "image/png" })) });
+      commit(() => {
+        p.annotations.push({ type: "cover", rect: [...r], color, remove: true });
+        p.annotations.push({ type: "image", rect: [...r], image: id });
+        selected = p.annotations.length - 1;
+        tool = "select";
+      });
+      mascot.flash("happy", "Sho! Lifted. Drag it where you want it; pull a corner to resize.", 3200);
+    } catch {
+      mascot.flash("eish", "Eish, I couldn't lift that bit.", 2600);
+    }
   }
 
   /** Moves an edit (scanned lines are redrawn in the scan's look at their new spot). */
@@ -1088,6 +1170,7 @@ export function editTool(): HTMLElement {
       }
 
       layer.setPointerCapture(e.pointerId);
+      const clickedPicture = tool === "lift" ? ((e.target as Element).closest?.(".pic-box") as SVGElement | null) : null;
       const preview = document.createElementNS(SVG_NS, tool === "draw" ? "path" : "rect");
       preview.classList.add("preview", `preview-${tool}`);
       if (tool === "draw") {
@@ -1122,6 +1205,12 @@ export function editTool(): HTMLElement {
           return;
         }
         const r = boxOf(start, end);
+        if (tool === "lift") {
+          // A click on a detected picture lifts that picture; a drag lifts the box drawn.
+          const box = r[2] - r[0] < 4 && r[3] - r[1] < 4 && clickedPicture ? (clickedPicture.dataset.box!.split(",").map(Number) as Box) : r;
+          if (box[2] - box[0] >= 6 && box[3] - box[1] >= 6) void liftArea(p, box);
+          return;
+        }
         if (r[2] - r[0] < 3 || r[3] - r[1] < 3) return;
         if (tool === "highlight") commit(() => p.annotations.push({ type: "highlight", rect: r, color: HIGHLIGHT }));
         else {
@@ -1330,6 +1419,11 @@ export function editTool(): HTMLElement {
       prev?.shift,
       line.angle ?? 0,
     );
+    // Let the colour control offer the document's own ink.
+    if (active) {
+      active.ink = detected.color;
+      stage.closest(".page-editor")?.querySelector(".format-bar")?.dispatchEvent(new Event("sync"));
+    }
   }
 
   /** Redraws a scanned line in the scan's own look and puts it in place of the old one. */

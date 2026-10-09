@@ -2595,3 +2595,45 @@ del {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* More colours in the format bar. */
+.fmt-colours {
+  flex-wrap: wrap;
+  max-width: 460px;
+}
+.recent-colours {
+  display: contents;
+}
+.swatch.doc-ink {
+  outline: 2px dashed var(--accent);
+  outline-offset: 1px;
+}
+
+/* Move area: detected pictures, and the box being drawn. */
+.pic-box {
+  fill: transparent;
+  stroke: transparent;
+  pointer-events: none;
+}
+.page-layer[data-tool="lift"] {
+  cursor: crosshair;
+}
+.page-layer[data-tool="lift"] .pic-box {
+  pointer-events: all;
+  cursor: pointer;
+  stroke: #d9822b;
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+.page-layer[data-tool="lift"] .pic-box:hover {
+  fill: rgb(217 130 43 / 0.14);
+}
+.preview-lift {
+  fill: rgb(217 130 43 / 0.12);
+  stroke: #d9822b;
+  stroke-width: 1.2;
+  stroke-dasharray: 4 3;
+}
+.ann-cover .cover-fill {
+  stroke: none;
+}
