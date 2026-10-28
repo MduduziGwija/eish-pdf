@@ -3,6 +3,13 @@ import { warmUp } from "./core/client";
 import { h, icon } from "./ui/dom";
 import { lines, mascot, pick } from "./ui/fun";
 import { compareTool } from "./tools/compare";
+import { compressTool } from "./tools/compress";
+import { formsTool } from "./tools/forms";
+import { pagesTool } from "./tools/pages";
+import { protectTool } from "./tools/protect";
+import { readTool } from "./tools/read";
+import { redactTool } from "./tools/redact";
+import { stampTool } from "./tools/stamp";
 import { convertTool } from "./tools/convert";
 import { editTool } from "./tools/edit";
 import { mergeTool } from "./tools/merge";
@@ -13,13 +20,20 @@ import { unlockTool } from "./tools/unlock";
 const SOURCE_URL = "https://github.com/MduduziGwija/eish-pdf";
 
 const TOOLS = [
-  { id: "unlock", label: "Unlock", icon: icon("lock"), build: unlockTool },
-  { id: "merge", label: "Merge", icon: icon("merge"), build: mergeTool },
-  { id: "split", label: "Split", icon: icon("scissors"), build: splitTool },
-  { id: "edit", label: "Edit", icon: icon("pen"), build: editTool },
-  { id: "convert", label: "Convert", icon: icon("convert"), build: convertTool },
-  { id: "compare", label: "Compare", icon: icon("compare"), build: compareTool },
-  { id: "ocr", label: "OCR", icon: icon("ocr"), build: ocrTool },
+  { group: "Organize", id: "read", label: "Read", icon: icon("eye"), build: readTool },
+  { group: "Organize", id: "pages", label: "Pages", icon: icon("pages"), build: pagesTool },
+  { group: "Organize", id: "merge", label: "Merge", icon: icon("merge"), build: mergeTool },
+  { group: "Organize", id: "split", label: "Split", icon: icon("scissors"), build: splitTool },
+  { group: "Organize", id: "compress", label: "Compress", icon: icon("squeeze"), build: compressTool },
+  { group: "Edit", id: "edit", label: "Edit", icon: icon("pen"), build: editTool },
+  { group: "Edit", id: "forms", label: "Forms", icon: icon("form"), build: formsTool },
+  { group: "Edit", id: "stamp", label: "Stamp", icon: icon("stamp"), build: stampTool },
+  { group: "Edit", id: "redact", label: "Redact", icon: icon("redact"), build: redactTool },
+  { group: "Scans", id: "ocr", label: "OCR", icon: icon("ocr"), build: ocrTool },
+  { group: "Secure", id: "unlock", label: "Unlock", icon: icon("lock"), build: unlockTool },
+  { group: "Secure", id: "protect", label: "Protect", icon: icon("shield"), build: protectTool },
+  { group: "Convert", id: "convert", label: "Convert", icon: icon("convert"), build: convertTool },
+  { group: "Convert", id: "compare", label: "Compare", icon: icon("compare"), build: compareTool },
 ] as const;
 type ToolId = (typeof TOOLS)[number]["id"];
 
@@ -72,7 +86,12 @@ const tabBar = h("nav.tabs", { role: "tablist", "aria-label": "Tools" });
 const indicator = h("span.tab-indicator", { "aria-hidden": "true" });
 tabBar.append(indicator);
 
+let lastGroup = "";
 for (const t of TOOLS) {
+  if (t.group !== lastGroup) {
+    lastGroup = t.group;
+    tabBar.append(h("span.tab-group", { "aria-hidden": "true" }, t.group));
+  }
   const btn = h("button.tab", { type: "button", role: "tab", id: `tab-${t.id}`, "aria-controls": `panel-${t.id}` }, t.icon, h("span", {}, t.label));
   btn.addEventListener("click", () => (location.hash = t.id));
   tabButtons.set(t.id, btn);
@@ -102,14 +121,14 @@ function show(id: ToolId) {
 }
 
 function route() {
-  const id = location.hash.slice(1) as ToolId;
+  const id = location.hash.slice(1).split("?")[0] as ToolId;
   show(TOOLS.some((t) => t.id === id) ? id : "unlock");
 }
 
 tabBar.addEventListener("keydown", (e) => {
   if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
   const ids = TOOLS.map((t) => t.id);
-  const current = ids.indexOf((location.hash.slice(1) as ToolId) || "unlock");
+  const current = ids.indexOf((location.hash.slice(1).split("?")[0] as ToolId) || "unlock");
   const next = ids[(current + (e.key === "ArrowRight" ? 1 : ids.length - 1)) % ids.length];
   location.hash = next;
   tabButtons.get(next)!.focus();
@@ -131,7 +150,7 @@ const footer = h(
 document.body.append(
   h("a.skip", { href: "#main" }, "Skip to tools"),
   h("div.backdrop", { "aria-hidden": "true" }, h("span.blob.b1"), h("span.blob.b2"), h("span.blob.b3")),
-  h("div.shell", {}, h("div.topbar", {}, h("span.brand-mini", {}, "eish", h("b", {}, ".pdf")), themeBtn), header, tabBar, stage, footer),
+  h("div.shell", {}, h("div.topbar", {}, h("span.brand-mini", {}, "eish", h("b", {}, ".pdf")), themeBtn), header, h("div.workbench", {}, tabBar, stage), footer),
 );
 
 addEventListener("hashchange", route);

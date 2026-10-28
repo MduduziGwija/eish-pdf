@@ -7,6 +7,7 @@ import type { Slide } from "./slides";
 import type { Comparison, CompareOptions, DocText } from "./compare";
 import type { PreparedPdf, SignatureInfo } from "./signing";
 import type { ScanImage } from "./scanimage";
+import type { CompressResult, FormField, PageImage, PagePlan, Properties, Protection, RedactOptions, RedactResult, SearchHit, Squeeze, StampOptions } from "./pageops";
 
 export class PdfError extends Error {
   constructor(public readonly kind: ErrorKind, message: string) {
@@ -84,5 +85,16 @@ export const pdf = {
   pdfToDocx: (input: PdfInput, title: string) => call<Uint8Array>({ op: "pdfToDocx", input, title }),
   pdfLines: (input: PdfInput) => call<string[][]>({ op: "pdfLines", input }),
   prepareSign: (bytes: Uint8Array, info: SignatureInfo) => call<PreparedPdf>({ op: "prepareSign", bytes, info }),
+  organize: (input: PdfInput, plan: PagePlan[]) => call<Uint8Array>({ op: "organize", input, plan }),
+  rebuildPages: (input: PdfInput, images: (PageImage | null)[]) => call<Uint8Array>({ op: "rebuildPages", input, images }),
+  compress: (input: PdfInput, level: Squeeze) => call<CompressResult>({ op: "compress", input, level }),
+  redact: (input: PdfInput, options: RedactOptions) => call<RedactResult>({ op: "redact", input, options }),
+  protect: (input: PdfInput, protection: Protection) => call<Uint8Array>({ op: "protect", input, protection }),
+  stamp: (input: PdfInput, options: StampOptions) => call<Uint8Array>({ op: "stamp", input, options }),
+  formFields: (input: PdfInput) => call<FormField[]>({ op: "formFields", input }),
+  fillForm: (input: PdfInput, values: Record<string, string>, flatten: boolean) => call<Uint8Array>({ op: "fillForm", input, values, flatten }),
+  readProps: (input: PdfInput) => call<Properties>({ op: "readProps", input }),
+  writeProps: (input: PdfInput, props: Properties) => call<Uint8Array>({ op: "writeProps", input, props }),
+  search: (session: number, needle: string) => call<SearchHit[]>({ op: "search", session, needle }),
   compare: (base: DocText, others: DocText[], options: CompareOptions) => call<Comparison[]>({ op: "compare", base, others, options }),
 };

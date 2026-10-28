@@ -1,6 +1,8 @@
 import { pdf, PdfError } from "../core/client";
 import { wordsFromBlocks, type TesseractBlock } from "../core/ocrwords";
+import type { PageImage } from "../core/pageops";
 import type { PdfInfo } from "../core/pdf";
+import { cleanPage, type Tidy } from "../scan/clean";
 import { LANGUAGES, startOcr, type OcrEngine, type OcrLanguage } from "../ocr/engine";
 import { fill, h, icon, replay } from "../ui/dom";
 import { baseName, dropzone, formatSize, plural, readBytes, saveFile, saveZip } from "../ui/files";
@@ -23,6 +25,42 @@ interface Item {
 /** Long side of the page image Tesseract reads, in pixels (~300 dpi for A4). */
 const MAX_SIDE = 3600;
 
+/** Long side of a cleaned-up page picture, in pixels (~200 dpi for A4). */
+const CLEAN_SIDE = 2400;
+
+/** Straightens and whitens each scanned page, returning the PDF with those pages replaced. */
+async function tidyPages(item: { bytes: Uint8Array; password?: string }, mode: Tidy, skipText: boolean, report: (text: string, p: number) => void): Promise<Uint8Array> {
+  const { session, pages } = await pdf.open({ bytes: item.bytes, password: item.password });
+  try {
+    const images: (PageImage | null)[] = [];
+    for (let i = 0; i < pages.length; i++) {
+      report(`Tidying page ${i + 1} of ${pages.length}…`, i / pages.length / 3);
+      if (skipText && (await pdf.hasText(session, i))) {
+        images.push(null);
+        continue;
+      }
+      const { width, height } = pages[i];
+      const png = await pdf.render(session, i, Math.min(200 / 72, CLEAN_SIDE / Math.max(width, height)));
+      const bitmap = await createImageBitmap(new Blob([png as BlobPart], { type: "image/png" }));
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      const raw = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const { raster } = cleanPage({ w: raw.width, h: raw.height, data: raw.data }, mode);
+      ctx.putImageData(new ImageData(raster.data as unknown as Uint8ClampedArray<ArrayBuffer>, raster.w, raster.h), 0, 0);
+      const blob = await new Promise<Blob>((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error("Couldn't save the tidied page."))), mode === "bw" ? "image/png" : "image/jpeg", 0.85));
+      images.push({ image: new Uint8Array(await blob.arrayBuffer()), width, height });
+      await new Promise((r) => setTimeout(r));
+    }
+    return await pdf.rebuildPages({ bytes: item.bytes, password: item.password }, images);
+  } finally {
+    void pdf.close(session);
+  }
+}
+
 const READING = [
   "Putting on my reading glasses…",
   "Squinting at the pixels, mfowethu…",
@@ -40,6 +78,8 @@ export function ocrTool(): HTMLElement {
   const language = h("select.input.select", { "aria-label": "Language of the documents" });
   for (const l of LANGUAGES) language.append(h("option", { value: l.id }, l.label));
   const skip = h("input", { type: "checkbox", checked: true });
+  const tidy = h("select.input.select", { "aria-label": "Tidy the scan first" });
+  for (const [v, l] of [["off", "Leave pages as they are"], ["whiten", "Straighten and whiten the paper"], ["bw", "Straighten, then black and white (smallest)"]]) tidy.append(h("option", { value: v }, l));
   const runBtn = h("button.btn.primary.big", { type: "button" }, icon("ocr"), h("span", {}, "Make searchable"));
   const zipBtn = h("button.btn", { type: "button", hidden: true }, icon("download"), "Download all (.zip)");
   const clearBtn = h("button.btn.ghost", { type: "button" }, "Clear");
@@ -48,6 +88,7 @@ export function ocrTool(): HTMLElement {
     "div.ocr-options",
     {},
     h("label.option", {}, h("span", {}, "Language"), language),
+    h("label.option", {}, h("span", {}, "Tidy first"), tidy),
     h("label.check", {}, skip, h("span", {}, "Skip pages that already have text")),
   );
   const toolbar = h("div.toolbar", { hidden: true }, summary, h("div.actions", {}, clearBtn, zipBtn, runBtn));
@@ -151,14 +192,18 @@ export function ocrTool(): HTMLElement {
   }
 
   async function process(engine: OcrEngine, item: Item): Promise<boolean> {
-    const { session, pages } = await pdf.open({ bytes: item.bytes, password: item.password });
+    let source: { bytes: Uint8Array; password?: string } = { bytes: item.bytes, password: item.password };
+    if (tidy.value !== "off") {
+      source = { bytes: await tidyPages(item, tidy.value as Tidy, skip.checked, (text, p) => ((item.note = text), (item.progress = p), tick(item))) };
+    }
+    const { session, pages } = await pdf.open(source);
     let read = 0;
     let skipped = 0;
     try {
       for (let i = 0; i < pages.length; i++) {
         const label = `Reading page ${i + 1} of ${pages.length}…`;
         item.note = label;
-        item.progress = i / pages.length;
+        item.progress = (tidy.value === "off" ? 0 : 1 / 3) + (i / pages.length) * (tidy.value === "off" ? 1 : 2 / 3);
         tick(item);
         if (skip.checked && (await pdf.hasText(session, i))) {
           skipped++;

@@ -9,6 +9,7 @@ import { slidesToPdf } from "./slides";
 import { documentToPdf, htmlToPdf, imagesToPdf, pdfLines, pdfToDocx, pdfToHtml, pdfToImages, pdfToText } from "./convert";
 import { compareDocs } from "./compare";
 import { prepareForSigning } from "./signing";
+import { compress, fillForm, formFields, organize, protect, rebuildPages, readProperties, redact, searchDocument, stamp, writeProperties } from "./pageops";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -94,6 +95,32 @@ function handle(req: Request): { result: unknown; transfer?: Transferable[] } {
     }
     case "pdfLines":
       return { result: pdfLines(req.input) };
+    case "organize":
+      return bytesResult(organize(req.input, req.plan));
+    case "rebuildPages":
+      return bytesResult(rebuildPages(req.input, req.images));
+    case "compress": {
+      const out = compress(req.input, req.level);
+      return { result: out, transfer: [out.bytes.buffer] };
+    }
+    case "redact": {
+      const out = redact(req.input, req.options);
+      return { result: out, transfer: [out.bytes.buffer] };
+    }
+    case "protect":
+      return bytesResult(protect(req.input, req.protection));
+    case "stamp":
+      return bytesResult(stamp(req.input, req.options));
+    case "formFields":
+      return { result: formFields(req.input) };
+    case "fillForm":
+      return bytesResult(fillForm(req.input, req.values, req.flatten));
+    case "readProps":
+      return { result: readProperties(req.input) };
+    case "writeProps":
+      return bytesResult(writeProperties(req.input, req.props));
+    case "search":
+      return { result: searchDocument(session(req.session), req.needle) };
     case "compare":
       return { result: req.others.map((o) => compareDocs(req.base, o, req.options)) };
     case "close":
