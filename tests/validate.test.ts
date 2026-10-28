@@ -35,10 +35,11 @@ describe("signature validation", () => {
     const bytes = signed().slice();
     const text = new TextDecoder("latin1").decode(bytes);
     const start = text.indexOf("/Contents <") + 11;
-    // Flip a byte near the end of the real signature bytes (the RSA value).
-    let end = start;
-    while (text.slice(end, end + 8) !== "00000000") end++;
-    bytes[end - 6] = bytes[end - 6] === 0x41 ? 0x42 : 0x41;
+    const slot = text.slice(start, text.indexOf(">", start));
+    // The last non-zero hex digit is the end of the real signature (the rest is padding): damage a digit well inside it.
+    const end = start + slot.replace(/0+$/, "").length;
+    const at = end - 40;
+    bytes[at] = bytes[at] === 0x41 ? 0x42 : 0x41;
     const [r] = validateSignatures(bytes);
     expect(r.status).toBe("invalid");
   });
