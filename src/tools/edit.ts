@@ -1348,10 +1348,10 @@ export function editTool(): HTMLElement {
 
   /**
    * Shared text-box behaviour: positions a textarea over the page, keeps it
-   * styled while the format bar changes, and saves on blur, Ctrl+Enter or a
+   * styled while the format bar changes, and saves on blur, Enter (Shift+Enter makes a new line) or a
    * click elsewhere (Esc cancels).
    */
-  function openBox(stage: HTMLElement, W: number, f: Fmt, initial: string, origin: () => Point, save: (text: string, f: Fmt, offset: Point) => void, singleLine: boolean, startOffset: Point = [0, 0], angle = 0, block?: { width: number; leading: number }) {
+  function openBox(stage: HTMLElement, W: number, f: Fmt, initial: string, origin: () => Point, save: (text: string, f: Fmt, offset: Point) => void, _singleLine: boolean, startOffset: Point = [0, 0], angle = 0, block?: { width: number; leading: number }) {
     const box = h("textarea.text-box", { rows: 1, "aria-label": "Text", spellcheck: true }) as HTMLTextAreaElement;
     box.value = initial;
     // Drag the grip to move the box (and its text) anywhere on the page.
@@ -1453,7 +1453,7 @@ export function editTool(): HTMLElement {
         if (e.key === "ArrowUp") offset[1] -= step;
         if (e.key === "ArrowDown") offset[1] += step;
         place();
-      } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey || singleLine)) {
+      } else if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         finish(true);
       } else if ((e.ctrlKey || e.metaKey) && ["b", "i", "u"].includes(e.key.toLowerCase())) {

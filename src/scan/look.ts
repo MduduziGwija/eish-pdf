@@ -574,7 +574,15 @@ class Frame {
       const err = sample.length ? error(pen) * (1 + 10 * Math.abs(Math.log(pen.stretch))) * lean : 0;
       return { pen, err, score: cand.score };
     };
-    const best = candidates.map(fitFace).sort((a, b) => a.err - b.err)[0];
+    let best = candidates.map(fitFace).sort((a, b) => a.err - b.err)[0];
+    // Blur makes strokes look heavier, which isn't a reason to switch to a bold face: the stroke is fitted separately.
+    // Keep the regular weight unless the bold one is clearly better.
+    if (best.pen.face.bold) {
+      const regular: Face = { family: best.pen.face.family, bold: false, italic: best.pen.face.italic };
+      await loadFace(regular);
+      const alt = fitFace(score(regular));
+      if (alt.err <= best.err * 1.25) best = alt;
+    }
     const { pen } = best;
     // Last check, over the whole line: its overall height should match the scan's.
     // (A few short handwritten words can mislead the size.)

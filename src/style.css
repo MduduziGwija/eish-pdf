@@ -334,13 +334,13 @@ a {
   animation: hat-sway 4.4s ease-in-out infinite;
 }
 .mascot[data-mood="happy"] .m-hat {
-  animation: hat-tip 0.9s var(--spring) 3;
+  animation: hat-tip 0.9s cubic-bezier(0.3, 0.7, 0.4, 1) 3;
 }
 .mascot.poked .m-hat {
-  animation: hat-hop 0.7s var(--spring);
+  animation: hat-hop 0.7s cubic-bezier(0.3, 0.7, 0.4, 1);
 }
 .mascot[data-mood="eish"] .m-hat {
-  animation: hat-droop 0.5s var(--spring) forwards;
+  animation: hat-droop 0.5s ease-out forwards;
 }
 .mascot[data-mood="work"] .m-hat {
   animation: hat-jig 0.32s ease-in-out infinite;
@@ -364,22 +364,29 @@ a {
   }
 }
 @keyframes hat-tip {
+  0%,
+  100% {
+    transform: none;
+  }
   35% {
-    transform: translate(10px, -46px) rotate(-16deg);
+    transform: translate(8px, -30px) rotate(-12deg);
   }
   70% {
-    transform: translate(-4px, -10px) rotate(3deg);
+    transform: translate(-2px, -6px) rotate(3deg);
   }
 }
 @keyframes hat-hop {
-  30% {
-    transform: translateY(-70px) rotate(300deg);
+  0% {
+    transform: none;
   }
-  60% {
-    transform: translateY(-20px) rotate(340deg);
+  35% {
+    transform: translateY(-34px) rotate(-12deg);
+  }
+  65% {
+    transform: translateY(-4px) rotate(4deg);
   }
   100% {
-    transform: rotate(360deg);
+    transform: none;
   }
 }
 @keyframes hat-droop {

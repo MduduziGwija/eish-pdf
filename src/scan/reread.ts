@@ -7,12 +7,15 @@ const meanConfidence = (l: OcrLine) => (l.words.length ? l.words.reduce((a, w) =
 
 /** Re-reads weakly read lines in place. `png` is the picture the lines were read from; `scale` is its pixels per point. Returns how many lines improved. */
 export async function rereadWeakLines(engine: OcrEngine, png: Uint8Array, lines: OcrLine[], scale: number): Promise<number> {
-  const weak = lines.filter((l) => l.words.length > 0 && meanConfidence(l) < 80);
+  // Lines worth a second look: read, but not well; capped, and given a time budget so a busy page never stalls.
+  const started = Date.now();
+  const weak = lines.filter((l) => l.words.length > 0 && meanConfidence(l) < 80 && meanConfidence(l) >= 20).sort((a, b) => b.words.length - a.words.length);
   if (weak.length === 0) return 0;
   const bitmap = await createImageBitmap(new Blob([png as BlobPart], { type: "image/png" }));
   let better = 0;
   try {
-    for (const line of weak.slice(0, 40)) {
+    for (const line of weak.slice(0, 16)) {
+      if (Date.now() - started > 7000) break;
       const pad = Math.ceil(line.size * scale * 0.25);
       const x0 = Math.max(0, Math.floor(line.bbox[0] * scale) - pad);
       const y0 = Math.max(0, Math.floor(line.bbox[1] * scale) - pad);
