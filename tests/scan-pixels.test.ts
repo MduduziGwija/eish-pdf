@@ -68,3 +68,25 @@ describe("scan pixel helpers", () => {
     expect([a(), a(), a()]).toEqual([b(), b(), b()]);
   });
 });
+
+describe("big letters and rules", () => {
+  it("keeps big letters out of the rule finder but still finds a thin line", async () => {
+    const { findRules, plane, protectBigLetters } = await import("../src/scan/pixels");
+    const w = 400;
+    const h = 200;
+    const ink = plane(w, h);
+    const fill = (x0: number, y0: number, x1: number, y1: number) => {
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) ink.data[y * w + x] = 1;
+    };
+    fill(20, 20, 120, 100); // a big solid letter (100x80)
+    fill(140, 20, 160, 100); // a tall stem
+    fill(10, 150, 390, 153); // a ruled line, 380 long and 3 thick
+    const rules = findRules(ink, 60, 1, 0.18);
+    expect(rules[60 * w + 60]).toBe(1); // the letter was (wrongly) taken for a rule
+    const blobs = protectBigLetters(rules, ink, 40, 150);
+    expect(blobs).toBe(2);
+    expect(rules[60 * w + 60]).toBe(0);
+    expect(rules[60 * w + 150]).toBe(0);
+    expect(rules[151 * w + 200]).toBe(1); // the line stays a rule
+  });
+});

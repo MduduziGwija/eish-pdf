@@ -24,6 +24,8 @@ function modelFor(language: OcrLanguage): { langs: string[]; config: Record<stri
 export interface OcrEngine {
   /** Reads a page image; `onProgress` gets 0–1 while it works. */
   read(png: Uint8Array, onProgress?: (p: number) => void): Promise<unknown[]>;
+  /** Reads a picture of one line of text, as one line (more accurate than finding the line on a page first). */
+  readLine(png: Uint8Array): Promise<{ text: string; confidence: number }>;
   stop(): Promise<void>;
 }
 
@@ -50,6 +52,15 @@ export async function startOcr(language: OcrLanguage): Promise<OcrEngine> {
         return (data.blocks ?? []) as unknown[];
       } finally {
         progress = undefined;
+      }
+    },
+    async readLine(png) {
+      await worker.setParameters({ tessedit_pageseg_mode: "7" as never });
+      try {
+        const { data } = await worker.recognize(new Blob([png as BlobPart], { type: "image/png" }));
+        return { text: data.text.replace(/\s+/g, " ").trim(), confidence: data.confidence };
+      } finally {
+        await worker.setParameters({ tessedit_pageseg_mode: "3" as never });
       }
     },
     stop: () => worker.terminate().then(() => undefined),

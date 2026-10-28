@@ -3,6 +3,7 @@ import { baselineOf, LINE_HEIGHT } from "../core/layout";
 import { frameOf, fromFrame, groupParagraphs, layoutParagraph, paragraphText, wrapText, type ParaLine, type Paragraph } from "../core/paragraphs";
 import type { Annotation, PageEdit, PageSize, Rgb, Rotation } from "../core/pdf";
 import type { OcrWord, TextLine } from "../core/text";
+import { rereadWeakLines } from "../scan/reread";
 import { linesFromBlocks, splitLinesAtRules, type OcrLine, type TesseractBlock } from "../core/ocrwords";
 import type { ScanPicture } from "../scan/look";
 import { corners, hull, lineQuad, steadyAngles, turnBytes, unturnAngle, unturnPoint, type Turn } from "../scan/orient";
@@ -110,7 +111,7 @@ export function editTool(): HTMLElement {
   } catch {
     // Storage blocked: the defaults.
   }
-  const editByFor = (source: number): "paragraph" | "line" => editByChoice ?? (scannedSources.has(source) ? "line" : "paragraph");
+  const editByFor = (_source: number): "paragraph" | "line" => editByChoice ?? "paragraph";
   let matchScan = true;
   /** "auto", or the CSS name of a font picked for redrawing scanned lines. */
   let scanFont = "auto";
@@ -301,6 +302,8 @@ export function editTool(): HTMLElement {
       // Each table cell is its own line: split where a ruled line ran between words.
       const turnedRules = turnBytes(rules, imgW, imgH, turn);
       const found = splitLinesAtRules(linesFromBlocks(blocks as TesseractBlock[], scale), turnedRules.data, turnedRules.w, turnedRules.h, scale);
+      // A second look at lines the first reading wasn't sure about.
+      await rereadWeakLines(engine, upright, found, scale).catch(() => 0);
       // Each line's tilt: its own for long lines (so a warped page follows its curve), the page's usual for short ones.
       const steady = steadyAngles(found.map((l) => ({ angle: l.angle, length: l.bbox[2] - l.bbox[0], size: l.size })));
       found.forEach((l, i) => (l.angle = steady[i]));

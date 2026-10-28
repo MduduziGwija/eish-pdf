@@ -107,6 +107,13 @@ export function linesFromBlocks(blocks: TesseractBlock[] | null | undefined, sca
  * after a label). Pieces on the same baseline, close together and of a similar
  * size, are joined back into one line, so editing it replaces all of it.
  */
+/** The usual gap between this line's words, in points (0 when it has fewer than two words). */
+function typicalGap(line: OcrLine): number {
+  const w = [...line.words].sort((a, b) => a.bbox[0] - b.bbox[0]);
+  const gaps = w.slice(1).map((x, i) => x.bbox[0] - w[i].bbox[2]).filter((g) => g > 0).sort((a, b) => a - b);
+  return gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
+}
+
 export function joinSplitLines(lines: OcrLine[]): OcrLine[] {
   const out = [...lines].sort((a, b) => a.bbox[0] - b.bbox[0]);
   let joined = true;
@@ -121,7 +128,7 @@ export function joinSplitLines(lines: OcrLine[]): OcrLine[] {
         const size = Math.max(a.size, b.size);
         const gap = b.bbox[0] - a.bbox[2];
         const similar = Math.min(a.size, b.size) / size >= 0.65;
-        if (overlap >= height * 0.5 && similar && gap > -size && gap <= size * 0.9 && Math.abs(a.origin[1] - b.origin[1]) <= size * 0.35) {
+        if (overlap >= height * 0.5 && similar && gap > -size && gap <= Math.min(size * 2.4, Math.max(size * 0.9, 2.2 * Math.max(typicalGap(a), typicalGap(b)))) && Math.abs(a.origin[1] - b.origin[1]) <= size * 0.35) {
           const words = [...a.words, ...b.words].sort((p, q) => p.bbox[0] - q.bbox[0]);
           const main = a.words.length >= b.words.length ? a : b;
           out[i] = {

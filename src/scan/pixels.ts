@@ -319,3 +319,28 @@ export function findRules(ink: Plane, minRun: number, grow = 1, threshold = 0.45
   }
   return dilate(mark, w, h, grow);
 }
+
+/**
+ * Big letters (headlines, large names) have strokes and rows of ink as long as a
+ * ruled line, so the rule finder takes them for rules. A letter is a compact blob:
+ * tall, not stretched, and well filled. Clears `rules` inside every such blob so
+ * large writing is left alone. (`minHeight` and `maxSize` are in pixels.)
+ */
+export function protectBigLetters(rules: Uint8Array, ink: Plane, minHeight: number, maxSize: number, threshold = 0.35): number {
+  const { w, h } = ink;
+  const mask = new Uint8Array(w * h);
+  for (let i = 0; i < mask.length; i++) mask[i] = ink.data[i] > threshold ? 1 : 0;
+  const { list } = components(mask, w, h);
+  let protectedBlobs = 0;
+  for (const c of list) {
+    const bw = c.x1 - c.x0;
+    const bh = c.y1 - c.y0;
+    if (bh < minHeight || bh > maxSize || bw > maxSize) continue;
+    if (bw / bh > 6 || bh / bw > 12) continue; // stretched: a line, not a letter
+    if (c.count / (bw * bh) < 0.1) continue; // hollow frame (a table box), not a letter
+    protectedBlobs++;
+    const pad = 3;
+    for (let y = Math.max(0, c.y0 - pad); y <= Math.min(h - 1, c.y1 + pad); y++) for (let x = Math.max(0, c.x0 - pad); x <= Math.min(w - 1, c.x1 + pad); x++) rules[y * w + x] = 0;
+  }
+  return protectedBlobs;
+}

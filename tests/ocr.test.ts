@@ -91,3 +91,25 @@ describe("joining split OCR lines", () => {
     expect(lines[0].origin[0]).toBe(70);
   });
 });
+
+describe("widely spaced lines", () => {
+  it("joins pieces of a typewriter line whose word gaps are wide", async () => {
+    const { joinSplitLines } = await import("../src/core/ocrwords");
+    const word = (text: string, x0: number, x1: number) => ({ text, bbox: [x0, 10, x1, 22] as [number, number, number, number], baseline: 20, confidence: 95 });
+    const piece = (words: ReturnType<typeof word>[]) => ({
+      text: words.map((w) => w.text).join(" "),
+      bbox: [words[0].bbox[0], 10, words.at(-1)!.bbox[2], 22] as [number, number, number, number],
+      origin: [words[0].bbox[0], 20] as [number, number],
+      size: 12,
+      words,
+      letters: [],
+      angle: 0,
+    });
+    // Words about 14pt apart (more than one font size) are one line; far-apart cells are not.
+    const left = piece([word("South", 10, 50), word("Africa", 64, 110)]);
+    const right = piece([word("Suid-Afrika", 134, 214)]);
+    expect(joinSplitLines([left, right]).length).toBe(1);
+    const far = piece([word("Name", 400, 440)]);
+    expect(joinSplitLines([left, far]).length).toBe(2);
+  });
+});

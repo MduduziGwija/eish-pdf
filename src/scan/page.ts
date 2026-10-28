@@ -3,7 +3,8 @@
 import { wordsFromBlocks, type TesseractBlock } from "../core/ocrwords";
 import type { OcrEngine } from "../ocr/engine";
 import { readQuality, turnedSize, type Turn } from "./orient";
-import { findRules, plane } from "./pixels";
+import { whiten } from "./clean";
+import { findRules, protectBigLetters, plane } from "./pixels";
 
 /** Canvas maps for turning an image `k` quarter turns clockwise (w×h is the size before turning). */
 const turnMap = (k: Turn, w: number, h: number): [number, number, number, number, number, number] => {
@@ -80,6 +81,8 @@ export async function withoutRules(png: Uint8Array, scale: number): Promise<{ cl
   bitmap.close();
   const img = ctx.getImageData(0, 0, w, h);
   const { data } = img;
+  // Shadows and uneven paper first: otherwise a dark corner looks like one enormous ruled line, and the writing in it is painted out.
+  data.set(whiten({ w, h, data }, "whiten").data);
   // Paper and ink brightness, from a sample of the pixels.
   const sample: number[] = [];
   for (let i = 0; i < w * h; i += 37) sample.push(0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]);
@@ -94,9 +97,11 @@ export async function withoutRules(png: Uint8Array, scale: number): Promise<{ cl
   }
   // Runs longer than any letter: about 28pt of ink in a straight line.
   const rules = findRules(ink, Math.round(28 * scale), 1, 0.18);
+  // Big letters have strokes as long as a ruled line: keep them out of it.
+  protectBigLetters(rules, ink, Math.round(18 * scale), Math.round(110 * scale));
   let count = 0;
   for (let i = 0; i < rules.length; i++) count += rules[i];
-  if (count < w * h * 0.0004) return { clean: png, rules, width: w, height: h };
+  if (count < w * h * 0.0004) return { clean: await exportPng(img, c, ctx), rules, width: w, height: h };
   // Paint them out with the paper's colour.
   const paper = [0, 0, 0];
   let n = 0;
@@ -111,8 +116,13 @@ export async function withoutRules(png: Uint8Array, scale: number): Promise<{ cl
     if (!rules[i]) continue;
     for (let k = 0; k < 3; k++) data[i * 4 + k] = fill[k];
   }
+  return { clean: await exportPng(img, c, ctx), rules, width: w, height: h };
+}
+
+/** The evened-out OCR copy as a PNG. Only the copy that is read: the scan itself is untouched. */
+async function exportPng(img: ImageData, c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): Promise<Uint8Array> {
   ctx.putImageData(img, 0, 0);
   const blob = await new Promise<Blob | null>((resolve) => c.toBlob(resolve, "image/png"));
-  if (!blob) return { clean: png, rules, width: w, height: h };
-  return { clean: new Uint8Array(await blob.arrayBuffer()), rules, width: w, height: h };
+  if (!blob) throw new Error("Couldn't prepare the page for reading.");
+  return new Uint8Array(await blob.arrayBuffer());
 }
