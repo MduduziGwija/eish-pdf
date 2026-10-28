@@ -60,6 +60,10 @@ export interface LineLook {
   stretch: number;
   /** Slant (positive leans right). */
   shear: number;
+  /** Letter-spacing, as a fraction of the font size. */
+  tracking: number;
+  /** How wide the gaps between words are, compared with the font's own (1 = as the font has them). */
+  space: number;
   /** Extra stroke width, in scan pixels (heavier print or a thicker pen). */
   weight: number;
   /** Blur, in scan pixels. */
@@ -137,11 +141,14 @@ interface Pen {
   stretch: number;
   shear: number;
   stroke: number;
+  /** Extra space after every letter, as a fraction of the font size (letter-spacing). */
+  tracking: number;
 }
 
 /** Font size words are drawn at when comparing shapes. */
 const PROBE = 64;
 const SIGMAS = [0, 0.45, 0.75, 1.05, 1.45, 1.95, 2.6];
+const TRACKS = [-0.05, -0.03, -0.015, 0, 0.015, 0.03, 0.05, 0.08, 0.12, 0.18];
 const SHEARS = [-0.24, -0.18, -0.12, -0.06, 0, 0.06, 0.12, 0.18, 0.24, 0.3];
 
 let canvas: HTMLCanvasElement | undefined;
@@ -166,15 +173,17 @@ function drawPlane(w: number, h: number, draw: (ctx: CanvasRenderingContext2D) =
   return plane(canvas.width, canvas.height, out);
 }
 
-function measure(face: Face, px: number, text: string): TextMetrics {
+function measure(face: Face, px: number, text: string, tracking = 0): TextMetrics {
   if (!canvas) drawPlane(1, 1, () => undefined);
   context.font = cssFont(face, px);
+  context.letterSpacing = `${(tracking * px).toFixed(2)}px`;
   return context.measureText(text);
 }
 
 /** Draws text with its baseline origin at (x, y). */
 function drawText(ctx: CanvasRenderingContext2D, pen: Pen, text: string, x: number, y: number, rotate = 0, scale = 1) {
   ctx.font = cssFont(pen.face, pen.px);
+  ctx.letterSpacing = `${(pen.tracking * pen.px).toFixed(2)}px`;
   ctx.setTransform(1, 0, 0, 1, x, y);
   if (rotate) ctx.rotate(rotate);
   ctx.transform(pen.stretch * scale, 0, -pen.shear * scale, scale, 0, 0);
@@ -191,7 +200,7 @@ const margin = (pen: Pen, sigma = 0) => pen.px * (0.6 + Math.abs(pen.shear) * 1.
 /** Draws text (optionally blurred) and crops it to its ink. */
 function inkOf(pen: Pen, text: string, sigma = 0): Plane | null {
   const m = margin(pen, sigma);
-  const drawn = drawPlane(measure(pen.face, pen.px, text).width * pen.stretch + m * 2, pen.px * 2.2 + sigma * 6, (ctx) => drawText(ctx, pen, text, m, pen.px * 1.5 + sigma * 3));
+  const drawn = drawPlane(measure(pen.face, pen.px, text, pen.tracking).width * pen.stretch + m * 2, pen.px * 2.2 + sigma * 6, (ctx) => drawText(ctx, pen, text, m, pen.px * 1.5 + sigma * 3));
   const p = blur(drawn, sigma);
   const box = inkBox(p, 0.35);
   return box && crop(p, box[0], box[1], box[2] - box[0], box[3] - box[1]);
@@ -218,12 +227,12 @@ const offsets = new Map<string, [number, number]>();
 /** Draws a word blurred, with its centre of ink at `centre`, on a w×h plane. */
 function placeWord(pen: Pen, sigma: number, text: string, w: number, h: number, centre: [number, number]): Plane {
   // Where the ink's centre sits relative to the text's origin (cached).
-  const key = `${cssFont(pen.face, pen.px)}|${pen.stretch}|${pen.shear}|${pen.stroke}|${text}`;
+  const key = `${cssFont(pen.face, pen.px)}|${pen.stretch}|${pen.shear}|${pen.stroke}|${pen.tracking}|${text}`;
   let offset = offsets.get(key);
   if (!offset) {
     const m = margin(pen);
     const oy = pen.px * 1.5;
-    const probe = drawPlane(measure(pen.face, pen.px, text).width * pen.stretch + m * 2, pen.px * 2.2, (ctx) => drawText(ctx, pen, text, m, oy));
+    const probe = drawPlane(measure(pen.face, pen.px, text, pen.tracking).width * pen.stretch + m * 2, pen.px * 2.2, (ctx) => drawText(ctx, pen, text, m, oy));
     const [cx, cy] = centroid(probe);
     offset = [cx - m, cy - oy];
     if (offsets.size > 4000) offsets.clear();
@@ -397,7 +406,7 @@ class Frame {
       const sizes: number[] = [];
       const stretches: number[] = [];
       for (const t of use) {
-        const r = inkOf({ face, px: PROBE, stretch: 1, shear: 0, stroke: 0 }, t.text);
+        const r = inkOf({ face, px: PROBE, stretch: 1, shear: 0, stroke: 0, tracking: 0 }, t.text);
         if (!r) continue;
         const sy = t.target.h / r.h;
         const sx = t.target.w / r.w;
@@ -435,10 +444,11 @@ class Frame {
         const scouted = scouts.map((f) => score(f));
         const byKind = new Map<Generic, number>();
         for (const sc of scouted) byKind.set(sc.face.family.generic, Math.max(byKind.get(sc.face.family.generic) ?? -1, sc.score));
-        const top = Math.max(...byKind.values());
         // Headline and decorative fonts are only for big text.
         if (line.size < 20) byKind.delete("display");
-        const kinds = new Set([...byKind].filter(([, v]) => v >= top - 0.08).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k]) => k));
+        const top = Math.max(...byKind.values());
+        // The two or three kinds that look closest (the probe fonts are only a rough guide to a whole kind).
+        const kinds = new Set([...byKind].filter(([, v]) => v >= top - 0.1).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k]) => k));
         // Then every font of those kinds (and the ones from this computer), the widest words first.
         const families = [...bundledFamilies().filter((f) => kinds.has(f.generic)), ...myFamilies()];
         state.status?.(`Trying ${families.length} fonts…`);
@@ -537,6 +547,7 @@ class Frame {
         stretch: Number.isFinite(cand.stretch) ? Math.min(1.3, Math.max(0.7, cand.stretch)) : 1,
         shear: 0,
         stroke: 0,
+        tracking: 0,
       };
       if (sample.length) {
         // Height, keeping the words' width (blur makes letters look taller than they are).
@@ -546,12 +557,21 @@ class Frame {
         // Slant (handwriting, or text set at an angle), then width.
         pen.shear = tune(SHEARS, (v) => ({ ...pen, shear: v }));
         pen.stretch = Math.min(1.3, Math.max(0.7, pen.stretch * tune([0.94, 0.96, 0.98, 1, 1.02, 1.04, 1.06], (v) => ({ ...pen, stretch: pen.stretch * v }))));
+        // Letter-spacing (wide-set typewriter text, tight headlines): trade width for spacing, twice over.
+        for (let round = 0; round < 2; round++) {
+          const t = tune(TRACKS, (v) => ({ ...pen, tracking: v, stretch: pen.stretch * Math.min(1.25, Math.max(0.75, 1 - (v - pen.tracking) * 0.9)) }));
+          pen.stretch = Math.min(1.3, Math.max(0.7, pen.stretch * Math.min(1.25, Math.max(0.75, 1 - (t - pen.tracking) * 0.9))));
+          pen.tracking = t;
+          pen.stretch = Math.min(1.3, Math.max(0.7, pen.stretch * tune([0.96, 0.98, 1, 1.02, 1.04], (v) => ({ ...pen, stretch: pen.stretch * v }))));
+        }
         // A heavier pen or print: thicken the font's strokes to the scan's.
         const fontStroke = median(sample.map((t, i) => strokeWidth(threshold(placeWord(pen, sigma, t.text, t.local.w, t.local.h, centres[i])))));
         if (Number.isFinite(scanStroke) && Number.isFinite(fontStroke)) pen.stroke = Math.min(pen.px * 0.12, Math.max(0, scanStroke - fontStroke));
       }
       // Fonts that only fit when squeezed or stretched are less likely to be the one.
-      const err = sample.length ? error(pen) * (1 + 10 * Math.abs(Math.log(pen.stretch))) : 0;
+      // Heavy blur on small print makes any font look bolder and narrower, so lean towards regular, full-width fonts unless the evidence is clear.
+      const lean = (cand.face.bold ? 1.05 : 1) * (/condensed|narrow|compressed/i.test(cand.face.family.label) ? 1.1 : 1);
+      const err = sample.length ? error(pen) * (1 + 10 * Math.abs(Math.log(pen.stretch))) * lean : 0;
       return { pen, err, score: cand.score };
     };
     const best = candidates.map(fitFace).sort((a, b) => a.err - b.err)[0];
@@ -570,6 +590,27 @@ class Frame {
       }
     }
     const hand = pen.face.family.generic === "hand";
+
+    // Word spacing: the scan's gaps between words, against the font's own.
+    let space = 1;
+    {
+      const boxes = line.words.filter((w) => w.text.trim()).map((w) => ({ t: w.text, b: this.boxPx(w.bbox) })).sort((a, b) => a.b[0] - b.b[0]);
+      const spaceW = measure(pen.face, pen.px, " ", pen.tracking).width * pen.stretch;
+      const found: number[] = [];
+      for (let i = 0; i + 1 < boxes.length; i++) {
+        const gap = boxes[i + 1].b[0] - boxes[i].b[2];
+        if (gap <= 0 || gap > pen.px * 2) continue;
+        const a = measure(pen.face, pen.px, boxes[i].t, pen.tracking);
+        const b = measure(pen.face, pen.px, boxes[i + 1].t, pen.tracking);
+        const rest = ((a.width - a.actualBoundingBoxRight) - b.actualBoundingBoxLeft) * pen.stretch;
+        if (spaceW > 0) found.push((gap - rest) / spaceW);
+      }
+      if (found.length >= 2) {
+        const v = Math.min(2.2, Math.max(0.5, median(found)));
+        // Ink edges blur the gaps a little, so only clearly wider or tighter spacing counts.
+        space = v > 0.72 && v < 1.32 ? 1 : v;
+      }
+    }
 
     // 5. The scan's own letters (a few of each) and whole words.
     const letters = new Map<string, Cutout[]>();
@@ -600,6 +641,8 @@ class Frame {
       px: pen.px,
       stretch: pen.stretch,
       shear: pen.shear,
+      tracking: pen.tracking,
+      space,
       weight: pen.stroke,
       sigma,
       gain,
@@ -729,10 +772,10 @@ class Frame {
     // The scan's own letters sit next to drawn ones, so they only help when the font matches closely (or it's handwriting).
     const reuse = opts.letters !== false && sameFace && Math.abs(opts.sizeScale - 1) < 0.03 && (look.hand || look.match >= 0.7);
     const hand = family.generic === "hand";
-    const pen: Pen = { face, px: look.px * opts.sizeScale, stretch: look.stretch, shear: chosen && !sameFace ? 0 : look.shear, stroke: look.weight * opts.sizeScale };
+    const pen: Pen = { face, px: look.px * opts.sizeScale, stretch: look.stretch, shear: chosen && !sameFace ? 0 : look.shear, stroke: look.weight * opts.sizeScale, tracking: look.tracking };
     const { sigma } = look;
     const rand = random(hash(`${line.bbox.join()}|${text}`));
-    const m = (s: string) => measure(face, pen.px, s);
+    const m = (s: string) => measure(face, pen.px, s, pen.tracking);
 
     // Lay the text out: the scan's own words and letters where we have them,
     // the fitted font elsewhere. Handwriting wobbles a little.
@@ -746,7 +789,7 @@ class Frame {
     for (const token of text.split(/(\s+)/)) {
       if (!token) continue;
       if (!token.trim()) {
-        x += m(token).width * pen.stretch * (hand ? 1 + gaussian(rand) * 0.15 : 1);
+        x += m(token).width * pen.stretch * look.space * (hand ? 1 + gaussian(rand) * 0.15 : 1);
         continue;
       }
       const start = x;
@@ -1145,7 +1188,10 @@ export class ScanPicture {
 
   /** How wide `text` comes out in the line's look, in points (for wrapping a paragraph). Call `prepare` first. */
   textWidth(look: LineLook, text: string, family?: string): number {
-    return measure(this.faceFor(look, family), look.px, text).width * look.stretch * this.upright.matrix[0];
+    const spaces = text.split(/\s+/).length - 1;
+    const face = this.faceFor(look, family);
+    const gap = spaces ? measure(face, look.px, " ", look.tracking).width * (look.space - 1) * spaces : 0;
+    return (measure(face, look.px, text, look.tracking).width * look.stretch + gap * look.stretch) * this.upright.matrix[0];
   }
 
   /** Paints `text` over the line in the line's look, and returns it in the scan picture's own pixels. */
@@ -1154,7 +1200,7 @@ export class ScanPicture {
     // A straightened view is sized for the old line: if the new text is longer, make the view bigger.
     let view = look.view;
     if (view.angle !== 0) {
-      const lengthPt = measure(look.face, look.px, text).width * look.stretch * this.upright.matrix[0] * 1.15;
+      const lengthPt = measure(look.face, look.px, text, look.tracking).width * look.stretch * look.space * this.upright.matrix[0] * 1.15;
       if (lengthPt > view.reach) view = look.view = this.viewOf(view.source, lengthPt);
     }
     // A move, as seen on the page → in the turned page → along the straightened line.

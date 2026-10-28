@@ -9,7 +9,8 @@ import { slidesToPdf } from "./slides";
 import { documentToPdf, htmlToPdf, imagesToPdf, pdfLines, pdfToDocx, pdfToHtml, pdfToImages, pdfToText } from "./convert";
 import { compareDocs } from "./compare";
 import { prepareForSigning } from "./signing";
-import { compress, fillForm, formFields, organize, protect, rebuildPages, readProperties, redact, searchDocument, stamp, writeProperties } from "./pageops";
+import { validateSignatures } from "../sign/validate";
+import { checkPdfa, compress, fillForm, flattenToPictures, listComments, preparePdfa, saveComments, formFields, organize, protect, rebuildPages, readProperties, redact, searchDocument, stamp, writeProperties } from "./pageops";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -99,6 +100,18 @@ function handle(req: Request): { result: unknown; transfer?: Transferable[] } {
       return bytesResult(organize(req.input, req.plan));
     case "rebuildPages":
       return bytesResult(rebuildPages(req.input, req.images));
+    case "listComments":
+      return { result: listComments(req.input) };
+    case "saveComments":
+      return bytesResult(saveComments(req.input, req.comments));
+    case "checkPdfa":
+      return { result: checkPdfa(req.input) };
+    case "preparePdfa":
+      return bytesResult(preparePdfa(req.input));
+    case "flatten":
+      return bytesResult(flattenToPictures(req.input, req.dpi));
+    case "validateSignatures":
+      return { result: validateSignatures(req.bytes) };
     case "compress": {
       const out = compress(req.input, req.level);
       return { result: out, transfer: [out.bytes.buffer] };

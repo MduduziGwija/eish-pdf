@@ -4,7 +4,7 @@ import type { ImageOptions } from "./convert";
 import type { Slide } from "./slides";
 import type { CompareOptions, DocText } from "./compare";
 import type { SignatureInfo } from "./signing";
-import type { PagePlan, Squeeze, RedactOptions, Protection, StampOptions, Properties, PageImage } from "./pageops";
+import type { PagePlan, Squeeze, RedactOptions, Protection, StampOptions, Properties, PageImage, Comment } from "./pageops";
 
 export type Request =
   | { id: number; op: "inspect"; input: PdfInput }
@@ -34,6 +34,12 @@ export type Request =
   | { id: number; op: "prepareSign"; bytes: Uint8Array; info: SignatureInfo }
   | { id: number; op: "organize"; input: PdfInput; plan: PagePlan[] }
   | { id: number; op: "rebuildPages"; input: PdfInput; images: (PageImage | null)[] }
+  | { id: number; op: "listComments"; input: PdfInput }
+  | { id: number; op: "saveComments"; input: PdfInput; comments: Comment[] }
+  | { id: number; op: "checkPdfa"; input: PdfInput }
+  | { id: number; op: "preparePdfa"; input: PdfInput }
+  | { id: number; op: "flatten"; input: PdfInput; dpi: number }
+  | { id: number; op: "validateSignatures"; bytes: Uint8Array }
   | { id: number; op: "compress"; input: PdfInput; level: Squeeze }
   | { id: number; op: "redact"; input: PdfInput; options: RedactOptions }
   | { id: number; op: "protect"; input: PdfInput; protection: Protection }

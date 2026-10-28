@@ -57,39 +57,49 @@ export const pick = <T,>(list: T[]): T => list[Math.floor(Math.random() * list.l
 
 export type Mood = "idle" | "nom" | "work" | "happy" | "eish" | "read";
 
+import bodyUrl from "../assets/mascot-body.webp";
+import hatUrl from "../assets/mascot-hat.webp";
+
+// The mascot is the Eish PDF icon, cut into layers (body and bucket hat) so the hat can move
+// on its own, with pupils drawn on top of blank eyes so they can follow the pointer.
+const K = 700 / 1254;
+const EYE_OPENINGS = {
+  left: [[420, 546], [470, 537], [520, 528], [558, 527], [563, 560], [548, 607], [520, 636], [482, 642], [442, 624], [418, 590], [408, 560]],
+  right: [[722, 497], [760, 481], [800, 472], [850, 464], [860, 490], [863, 520], [850, 558], [812, 575], [772, 568], [738, 545], [724, 520]],
+} as const;
+const IRIS = { left: [508, 592], right: [797, 518] } as const;
+const scaled = (pts: readonly (readonly number[])[]) => pts.map(([x, y]) => `${(x * K).toFixed(1)},${(y * K).toFixed(1)}`).join(" ");
+const box = (pts: readonly (readonly number[])[]) => {
+  const xs = pts.map((p) => p[0] * K);
+  const ys = pts.map((p) => p[1] * K);
+  return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+};
+
+const eyeMarkup = (side: "left" | "right") => {
+  const [cx, cy] = IRIS[side].map((v) => v * K);
+  const b = box(EYE_OPENINGS[side]);
+  return `
+    <clipPath id="m-clip-${side}"><polygon points="${scaled(EYE_OPENINGS[side])}"/></clipPath>
+    <g clip-path="url(#m-clip-${side})">
+      <g class="m-pupil" data-side="${side}">
+        <ellipse cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" rx="29" ry="35" fill="#3b2013"/>
+        <ellipse cx="${cx.toFixed(1)}" cy="${(cy + 3).toFixed(1)}" rx="15" ry="21" fill="#050403"/>
+        <circle cx="${(cx - 11).toFixed(1)}" cy="${(cy - 14).toFixed(1)}" r="8" fill="#fff"/>
+        <circle cx="${(cx + 9).toFixed(1)}" cy="${(cy + 14).toFixed(1)}" r="3" fill="#fff" opacity=".7"/>
+      </g>
+      <rect class="m-lid" x="${(b.x - 4).toFixed(1)}" y="${(b.y - 4).toFixed(1)}" width="${(b.w + 8).toFixed(1)}" height="${(b.h + 8).toFixed(1)}"/>
+    </g>`;
+};
+
 const MASCOT_SVG = `
-<svg class="mascot-svg" viewBox="0 -30 120 170" aria-hidden="true">
-  <ellipse class="m-shadow" cx="60" cy="134" rx="34" ry="5"/>
+<svg class="mascot-svg" viewBox="0 0 700 700" aria-hidden="true">
+  <ellipse class="m-shadow" cx="350" cy="672" rx="200" ry="14"/>
   <g class="m-body">
-    <path class="m-page" d="M22 8h54l26 26v86a12 12 0 0 1-12 12H22a12 12 0 0 1-12-12V20A12 12 0 0 1 22 8z"/>
-    <path class="m-fold" d="M76 8v18a8 8 0 0 0 8 8h18z"/>
-    <rect class="m-band" x="10" y="98" width="92" height="9"/>
-    <g class="m-eyes">
-      <ellipse class="m-eye" cx="42" cy="62" rx="7" ry="9"/>
-      <ellipse class="m-eye" cx="74" cy="62" rx="7" ry="9"/>
-      <circle class="m-glint" cx="44.5" cy="58.5" r="2.4"/>
-      <circle class="m-glint" cx="76.5" cy="58.5" r="2.4"/>
-    </g>
-    <path class="m-brow" d="M33 47l15 5M83 47l-15 5"/>
-    <circle class="m-cheek" cx="30" cy="78" r="5.5"/>
-    <circle class="m-cheek" cx="86" cy="78" r="5.5"/>
-    <path class="m-mouth m-smile" d="M48 80q10 9 20 0"/>
-    <ellipse class="m-mouth m-o" cx="58" cy="83" rx="7" ry="8"/>
-    <path class="m-mouth m-flat" d="M47 85q11-6 22 0"/>
-    <path class="m-mouth m-grin" d="M44 78h28q-2 14-14 14t-14-14z"/>
-    <path class="m-sweat" d="M95 40q5 8 0 12q-5-4 0-12z"/>
-    <g class="m-glasses">
-      <circle cx="42" cy="62" r="12"/>
-      <circle cx="74" cy="62" r="12"/>
-      <path d="M54 61q4-4 8 0M30 60l-12-4M86 60l12-4"/>
-    </g>
-    <g class="m-hat">
-      <path class="m-hat-brim" d="M21 14Q60 25 99 14L114 34Q60 54 6 34Z"/>
-      <path class="m-hat-stitch" d="M13 31Q60 48 107 31M17 25Q60 40 103 25"/>
-      <path class="m-hat-crown" d="M23 17C22-9 38-25 60-25S98-9 97 17Q60 27 23 17Z"/>
-      <path class="m-hat-stitch" d="M33 9C33-9 45-19 60-19S87-9 87 9M43 4C43-6 50-13 60-13S77-6 77 4"/>
-      <path class="m-hat-band" d="M24 8Q60 18 96 8L97 17Q60 27 23 17Z"/>
-    </g>
+    <image href="${bodyUrl}" width="700" height="700"/>
+    <defs></defs>
+    ${eyeMarkup("left")}
+    ${eyeMarkup("right")}
+    <g class="m-hat"><image href="${hatUrl}" width="700" height="700"/></g>
   </g>
 </svg>`;
 
@@ -103,11 +113,55 @@ class Mascot {
     this.bubble = h("div.bubble", { role: "status", "aria-live": "polite" });
     const figure = svg(MASCOT_SVG);
     this.el = h("button.mascot", { type: "button", "aria-label": "Eish, the mascot. Click to poke.", "data-mood": "idle" }, figure);
+    this.watch(figure);
     this.el.addEventListener("click", () => {
       if (this.busyTimer) return;
       replay(this.el, "poked");
       this.flash("eish", pick(lines.poke), 1400);
     });
+  }
+
+  /** Pupils follow the pointer (or look down while reading, dart about while working); the mascot blinks now and then. */
+  private watch(figure: SVGSVGElement): void {
+    const pupils = [...figure.querySelectorAll<SVGGElement>(".m-pupil")];
+    let pointer: { x: number; y: number } | undefined;
+    const cur = { x: 0, y: 0 };
+    const moves = reducedMotion() ? 0 : 1;
+    addEventListener("pointermove", (e: PointerEvent) => (pointer = { x: e.clientX, y: e.clientY }), { passive: true });
+    addEventListener("pointerleave", () => (pointer = undefined));
+    document.addEventListener("mouseleave", () => (pointer = undefined));
+    const frame = (t: number) => {
+      requestAnimationFrame(frame);
+      if (document.hidden || !moves) return;
+      let tx = 0;
+      let ty = 0;
+      const mood = this.el.dataset.mood;
+      if (mood === "read") (tx = Math.sin(t / 380) * 9), (ty = 8);
+      else if (mood === "work") (tx = Math.sin(t / 170) * 10), (ty = Math.cos(t / 260) * 3);
+      else if (pointer) {
+        const r = this.el.getBoundingClientRect();
+        const dx = pointer.x - (r.left + r.width * 0.5);
+        const dy = pointer.y - (r.top + r.height * 0.42);
+        const d = Math.hypot(dx, dy) || 1;
+        const pull = Math.min(1, d / 220);
+        tx = (dx / d) * 12 * pull;
+        ty = (dy / d) * 9 * pull;
+      }
+      cur.x += (tx - cur.x) * 0.18;
+      cur.y += (ty - cur.y) * 0.18;
+      for (const p of pupils) p.style.transform = `translate(${cur.x.toFixed(2)}px, ${cur.y.toFixed(2)}px)`;
+    };
+    requestAnimationFrame(frame);
+    const blink = () => {
+      if (!document.hidden && !reducedMotion()) {
+        this.el.classList.add("blinking");
+        setTimeout(() => this.el.classList.remove("blinking"), 140);
+        // Now and then, a double blink.
+        if (Math.random() < 0.2) setTimeout(() => (this.el.classList.add("blinking"), setTimeout(() => this.el.classList.remove("blinking"), 120)), 260);
+      }
+      setTimeout(blink, 2200 + Math.random() * 3800);
+    };
+    setTimeout(blink, 1800);
   }
 
   get bubbleEl(): HTMLElement {

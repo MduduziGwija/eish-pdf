@@ -129,3 +129,53 @@ describe("compress", () => {
     check.destroy();
   });
 });
+
+describe("comments", () => {
+  it("adds, lists, edits and removes comments", async () => {
+    const { listComments, saveComments } = await import("../src/core/pageops");
+    const src = makePdf(2);
+    const added = saveComments(input(src), [
+      { id: "", page: 0, kind: "note", rect: [100, 100, 124, 124], text: "Check this figure", author: "Mduduzi", color: [1, 0.8, 0.1] },
+      { id: "", page: 1, kind: "highlight", rect: [72, 90, 200, 110], text: "Important", author: "Mduduzi", color: [1, 0.9, 0.2] },
+    ]);
+    const list = listComments(input(added));
+    expect(list.map((c) => [c.page, c.kind, c.text, c.author])).toEqual([
+      [0, "note", "Check this figure", "Mduduzi"],
+      [1, "highlight", "Important", "Mduduzi"],
+    ]);
+    // Edit one, drop the other.
+    const edited = saveComments(input(added), [{ ...list[0], text: "Checked, thanks" }]);
+    const after = listComments(input(edited));
+    expect(after.map((c) => c.text)).toEqual(["Checked, thanks"]);
+    expect(pageTexts(edited)).toEqual(["Page 1", "Page 2"]);
+  });
+});
+
+describe("PDF/A", () => {
+  it("flags what's missing, repairs it, and is honest about fonts", async () => {
+    const { checkPdfa, preparePdfa } = await import("../src/core/pageops");
+    const before = checkPdfa(input(makePdf(1)));
+    expect(before.ready).toBe(false);
+    expect(before.findings.find((f) => f.id === "metadata")?.state).toBe("fixable");
+    expect(before.findings.find((f) => f.id === "intent")?.state).toBe("fixable");
+    const fixed = preparePdfa(input(makePdf(1)));
+    const after = checkPdfa(input(fixed));
+    expect(after.findings.find((f) => f.id === "metadata")?.state).toBe("ok");
+    expect(after.findings.find((f) => f.id === "intent")?.state).toBe("ok");
+    expect(pageTexts(fixed)).toEqual(["Page 1"]);
+    // The colour profile is a well-formed ICC profile.
+    const doc = new mupdf.PDFDocument(fixed);
+    const profile = doc.getTrailer().get("Root").get("OutputIntents", 0, "DestOutputProfile").readStream().asUint8Array();
+    expect(new TextDecoder().decode(profile.subarray(36, 40))).toBe("acsp");
+    expect(new DataView(profile.buffer, profile.byteOffset).getUint32(0)).toBe(profile.length);
+    doc.destroy();
+  });
+  it("flattens to pictures", async () => {
+    const { flattenToPictures } = await import("../src/core/pageops");
+    const out = flattenToPictures(input(makePdf(2)), 72);
+    const doc = mupdf.Document.openDocument(out, "application/pdf");
+    expect(doc.countPages()).toBe(2);
+    doc.destroy();
+    expect(pageTexts(out)).toEqual(["", ""]);
+  });
+});

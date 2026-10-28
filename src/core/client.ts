@@ -7,7 +7,8 @@ import type { Slide } from "./slides";
 import type { Comparison, CompareOptions, DocText } from "./compare";
 import type { PreparedPdf, SignatureInfo } from "./signing";
 import type { ScanImage } from "./scanimage";
-import type { CompressResult, FormField, PageImage, PagePlan, Properties, Protection, RedactOptions, RedactResult, SearchHit, Squeeze, StampOptions } from "./pageops";
+import type { SignatureReport } from "../sign/validate";
+import type { CompressResult, Comment, FormField, PageImage, PdfaReport, PagePlan, Properties, Protection, RedactOptions, RedactResult, SearchHit, Squeeze, StampOptions } from "./pageops";
 
 export class PdfError extends Error {
   constructor(public readonly kind: ErrorKind, message: string) {
@@ -87,6 +88,12 @@ export const pdf = {
   prepareSign: (bytes: Uint8Array, info: SignatureInfo) => call<PreparedPdf>({ op: "prepareSign", bytes, info }),
   organize: (input: PdfInput, plan: PagePlan[]) => call<Uint8Array>({ op: "organize", input, plan }),
   rebuildPages: (input: PdfInput, images: (PageImage | null)[]) => call<Uint8Array>({ op: "rebuildPages", input, images }),
+  listComments: (input: PdfInput) => call<Comment[]>({ op: "listComments", input }),
+  saveComments: (input: PdfInput, comments: Comment[]) => call<Uint8Array>({ op: "saveComments", input, comments }),
+  checkPdfa: (input: PdfInput) => call<PdfaReport>({ op: "checkPdfa", input }),
+  preparePdfa: (input: PdfInput) => call<Uint8Array>({ op: "preparePdfa", input }),
+  flatten: (input: PdfInput, dpi: number) => call<Uint8Array>({ op: "flatten", input, dpi }),
+  validateSignatures: (bytes: Uint8Array) => call<SignatureReport[]>({ op: "validateSignatures", bytes }),
   compress: (input: PdfInput, level: Squeeze) => call<CompressResult>({ op: "compress", input, level }),
   redact: (input: PdfInput, options: RedactOptions) => call<RedactResult>({ op: "redact", input, options }),
   protect: (input: PdfInput, protection: Protection) => call<Uint8Array>({ op: "protect", input, protection }),

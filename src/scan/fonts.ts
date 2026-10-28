@@ -35,7 +35,16 @@ export const bundledFamilies = (): Family[] => BUNDLED;
 export const myFamilies = (): Family[] => mine;
 
 /** One font per kind of writing, tried first to see which kinds are worth a closer look. */
-const SCOUT_IDS = ["tinos", "arimo", "cousine", "patrick-hand", "caveat", "homemade-apple", "bebas-neue"];
+const SCOUT_IDS = [
+  // Serif: classic, sturdy and high-contrast.
+  "tinos", "merriweather", "playfair-display", "libre-baskerville",
+  // Sans: neutral, humanist, geometric and condensed.
+  "arimo", "open-sans", "montserrat", "oswald", "ubuntu",
+  // Typewriter and fixed-width.
+  "cousine", "courier-prime", "special-elite", "roboto-mono",
+  // Handwriting and headlines.
+  "patrick-hand", "caveat", "homemade-apple", "bebas-neue", "abril-fatface",
+];
 export const SCOUTS: Family[] = SCOUT_IDS.map((id) => BUNDLED.find((f) => f.css === `EishScan ${id}`)).filter((f): f is Family => !!f);
 
 export const GENERIC_LABELS: Record<Generic, string> = {
