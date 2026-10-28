@@ -3396,3 +3396,70 @@ details.scan-options[hidden] {
 .toolbar .input.small {
   width: 200px;
 }
+
+/* ---------- Editor: tools in a floating column beside the page ---------- */
+.editor-body {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.editor-body .palette {
+  position: sticky;
+  top: 12px;
+  z-index: 2;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.editor-body .tool-btn {
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  width: 68px;
+  padding: 9px 4px 7px;
+  border: 0;
+  border-radius: 14px;
+  background: none;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.15;
+  text-align: center;
+  color: var(--muted);
+}
+.editor-body .tool-btn .glyph {
+  font-size: 1.35rem;
+  color: var(--text);
+}
+.editor-body .tool-btn:hover {
+  transform: none;
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.editor-body .tool-btn[aria-pressed="true"] {
+  background: var(--nav-on);
+  color: var(--nav-on-ink);
+  animation: none;
+}
+.editor-body .tool-btn[aria-pressed="true"] .glyph {
+  color: var(--nav-on-ink);
+}
+@media (max-width: 760px) {
+  .editor-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .editor-body .palette {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+  }
+  .editor-body .tool-btn {
+    flex: none;
+    width: 64px;
+  }
+}

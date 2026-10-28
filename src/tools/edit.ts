@@ -1037,8 +1037,9 @@ export function editTool(): HTMLElement {
     const editor = h(
       `div.page-editor${enlarged ? ".enlarged" : ""}`,
       {},
-      h("div.editor-bar", {}, h("div.editor-row", {}, palette, zoomBox, enlarged && h("div.actions", {}, undoBtn, certBtn, saveBtn)), options),
-      wrap,
+      h("div.editor-bar", {}, h("div.editor-row", {}, zoomBox, enlarged && h("div.actions", {}, undoBtn, certBtn, saveBtn)), options),
+      // Tools in a floating column beside the page, as in a desktop editor.
+      h("div.editor-body", {}, palette, wrap),
       nav,
     );
     return editor;

@@ -50,5 +50,10 @@ export const FONT_URLS = import.meta.glob("/node_modules/@fontsource/{${ids.join
 writeFileSync(join(root, "src", "scan", "fontlist.ts"), out);
 
 const licences = rows.map((r) => `${r.label} (${r.license})${r.attribution ? ": " + r.attribution : ""}`).join("\n");
-writeFileSync(join(root, "public", "font-licenses.txt"), `Fonts used by Eish PDF to redraw scanned text, from the Fontsource project (https://fontsource.org).\nEach font is free software under the licence named; see the links for the full texts.\n\n${licences}\n`);
+// Full licence texts that travel with the fonts (the OFL asks for this when fonts are redistributed).
+const full = join(root, "scripts", "licenses");
+const texts = existsSync(full)
+  ? readdirSync(full).filter((f) => f.endsWith(".txt")).sort().map((f) => `\n\n===== ${f.replace(/^OFL-|\.txt$/g, "")} (SIL Open Font License 1.1) =====\n\n${readFileSync(join(full, f), "utf8").trim()}`).join("")
+  : "";
+writeFileSync(join(root, "public", "font-licenses.txt"), `Fonts used by Eish PDF to redraw scanned text, from the Fontsource project (https://fontsource.org).\nEach font is free software under the licence named; see the links for the full texts.\n\n${licences}\n${texts}\n`);
 console.log(`${rows.length} font families, ${(bytes / 1e6).toFixed(1)} MB`, Object.entries(rows.reduce((a, r) => ((a[r.kind] = (a[r.kind] ?? 0) + 1), a), {})));
