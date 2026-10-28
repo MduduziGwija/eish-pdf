@@ -8,6 +8,7 @@ Free PDF tools that run entirely in your browser — nothing is uploaded, ever.
 |---|---|
 | 👁 **Read** | A quick reader: continuous scroll, zoom, fit width, search with highlighted matches, page jump and a night mode. Open a PDF from a link: paste one, or use `#read?url=https://…` (the other site must allow it). |
 | ▦ **Pages** | Organize: drag pages into a new order, turn them, copy them, remove them (or all odd/even ones), reverse, then save a new PDF. |
+| 🪄 **Auto split** | Drop one PDF that holds many documents (a batch of statements, letters, payslips) and it works out where each one starts, from patterns: a page counter that starts over ("Page 1"), an identifier that changes ("Student: …", "Account no: …"), an opening heading, or blank separator pages. It shows the patterns it found and its best guess, shades the pages per document, lets you click any page to start or join a document, names each file after its identifier, and downloads them all as a ZIP. Scans need OCR first. |
 | 🗜 **Compress** | Shrinks the file: removes leftovers and duplicates and re-compresses big pictures to 220, 150 or 100 dpi. Text stays crisp and searchable. |
 | 💬 **Comments** | Add notes, highlights, underlines, strike-outs and boxes with a comment; edit or delete the comments already in the PDF; save. |
 | 🏅 **Signatures** | Checks the certificate signatures in a PDF: who signed, when, whether the signed content is unchanged, whether the signature is genuine, whether anything was added after it, and the certificate's dates. (No list of trusted authorities in a browser, so it says so rather than promising the signer is who they claim.) |
@@ -70,6 +71,7 @@ src/convert/         reads Word (via Mammoth), Excel and PowerPoint files in the
 src/core/worker.ts   runs the engine off the main thread
 src/ocr/engine.ts    loads Tesseract on first use
 src/core/client.ts   promise API the UI uses to talk to the worker
+src/core/autosplit.ts finds where one document ends and the next begins (patterns in each page's text)
 src/core/pageops.ts  organize, compress, redact, protect, stamp, forms, properties, search
 src/sign/validate.ts   checks PDF signatures (digest, signature, coverage, certificate)
 src/scan/clean.ts    scan tidy-up: skew detection, straightening, whitening, black and white

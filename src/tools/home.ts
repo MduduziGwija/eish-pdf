@@ -13,6 +13,7 @@ const TILES: Tile[] = [
   { id: "pages", label: "Pages", blurb: "Rearrange, turn or delete pages.", icon: "pages", tone: "gold" },
   { id: "merge", label: "Merge", blurb: "Combine multiple PDFs into one.", icon: "merge", tone: "blue" },
   { id: "split", label: "Split", blurb: "Separate your PDF into multiple files.", icon: "scissors", tone: "purple" },
+  { id: "autosplit", label: "Auto split", blurb: "Splits a batch of documents by itself.", icon: "wand", tone: "pink" },
   { id: "compress", label: "Compress", blurb: "Reduce file size without losing quality.", icon: "squeeze", tone: "mint" },
   { id: "edit", label: "Edit", blurb: "Change text, add images and sign.", icon: "pen", tone: "pink" },
   { id: "comments", label: "Comments", blurb: "Notes, highlights and boxes with comments.", icon: "comment", tone: "purple" },

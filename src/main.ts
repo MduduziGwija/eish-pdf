@@ -5,6 +5,7 @@ import { lines, mascot, pick } from "./ui/fun";
 import logoUrl from "./assets/logo.webp";
 import { homeTool } from "./tools/home";
 import { compareTool } from "./tools/compare";
+import { autoSplitTool } from "./tools/autosplit";
 import { commentsTool } from "./tools/comments";
 import { pdfaTool } from "./tools/pdfa";
 import { verifyTool } from "./tools/verify";
@@ -30,6 +31,7 @@ const TOOLS = [
   { group: "Organize", id: "pages", label: "Pages", icon: icon("pages"), build: pagesTool },
   { group: "Organize", id: "merge", label: "Merge", icon: icon("merge"), build: mergeTool },
   { group: "Organize", id: "split", label: "Split", icon: icon("scissors"), build: splitTool },
+  { group: "Organize", id: "autosplit", label: "Auto split", icon: icon("wand"), build: autoSplitTool },
   { group: "Organize", id: "compress", label: "Compress", icon: icon("squeeze"), build: compressTool },
   { group: "Edit", id: "edit", label: "Edit", icon: icon("pen"), build: editTool },
   { group: "Edit", id: "comments", label: "Comments", icon: icon("comment"), build: commentsTool },
