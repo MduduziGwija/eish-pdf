@@ -91,12 +91,24 @@ const ID_WORDS = /student|account|acc\b|\bid\b|identity|number|\bno\b|ref|invoic
 const NOT_ID = /^(date|time|page|printed|statement date|transactions? up to|total|balance|amount|period|due|currency|tel|phone|fax|email)/i;
 const DATEISH = /^\d{1,2}[-/ ][A-Za-z]{3,9}[-/ ]\d{2,4}|^\d{4}-\d{2}-\d{2}|^\d{1,2}[/.]\d{1,2}[/.]\d{2,4}|^\d{1,2}H\d{2}/i;
 
+const KEY = /^(student|account|acc|id|identity|number|no|nr|ref|reference|invoice|policy|employee|staff|customer|client|member|case|reg|registration|patient|claim|order|file|name|surname|holder|candidate|learner|date|time|page|total|balance|amount|period|due|tel|phone|email|statement|transactions?|up|to)$/i;
+
+/** The label in front of a colon, without other text that happens to sit before it ("TOWN   Student" -> "student"). */
+function labelOf(raw: string): string {
+  const words = raw.trim().toLowerCase().split(/\s+/);
+  const last = words[words.length - 1];
+  const prev = words[words.length - 2];
+  if (words.length === 1) return last;
+  if (KEY.test(last)) return prev && KEY.test(prev) ? `${prev} ${last}` : last;
+  return words.slice(-2).join(" ");
+}
+
 /** "Label: value" pairs on a page (first of each label). */
 export function labelledValues(lines: string[]): Map<string, string> {
   const out = new Map<string, string>();
   for (const line of lines) {
     for (const m of line.matchAll(/([A-Za-z][A-Za-z.#/ ]{0,28}?)\s*[:：]\s*([A-Za-z0-9][A-Za-z0-9\-._/]{1,30}(?:\s[A-Za-z0-9\-._/]{1,20})?)/g)) {
-      const label = m[1].trim().toLowerCase().replace(/\s+/g, " ");
+      const label = labelOf(m[1]);
       const value = m[2].trim();
       if (label.length < 2 || NOT_ID.test(label) || DATEISH.test(value)) continue;
       if (!out.has(label)) out.set(label, value);
@@ -234,3 +246,134 @@ export function groupsFor(starts: number[], pageCount: number, drop: number[] = 
 
 /** A safe file name piece from a label ("2230 74" -> "2230_74"). */
 export const fileSafe = (s: string) => s.replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
+
+// --- Naming each document ------------------------------------------------------------
+
+export interface DocInfo {
+  /** A person's name (titles removed), e.g. "KP HLAHLA". */
+  name?: string;
+  /** An identifier that differs from document to document (student, account, ID number...). */
+  id?: string;
+  /** What kind of document it is, e.g. "Statement". */
+  type?: string;
+}
+
+const TITLES = "MR|MRS|MS|MISS|MNR|MEV|MEJ|DR|PROF|ADV|HON|REV|SIR|MX";
+// Words that end a name when a line reads "MR KP HLAHLA   PAGE: 1".
+const STOP = /\b(PAGE|STUDENT|DATE|TEL|PHONE|CELL|NO|NR|NUMBER|ID|REF|REFERENCE|ACCOUNT|ACC|STATEMENT|INVOICE|COPY|FAX|EMAIL|ADDRESS|DOB|BORN|TRANSACTIONS|OF)\b.*$/i;
+const TYPES = /^(statement|invoice|tax invoice|receipt|payslip|pay slip|certificate|letter|report|quotation|quote|contract|agreement|application|results?|academic record|transcript|form|policy|notice|summary|schedule|account|fee account|credit note|debit note|order|delivery note|certificate of|offer|reference|affidavit|permit|licen[cs]e|booking|ticket|bill|payment advice|remittance)\b/i;
+
+const SMALL = new Set(["of", "and", "for", "the", "to", "in", "on", "a", "an", "van", "de", "der"]);
+const titleCase = (text: string) =>
+  text
+    .split(/\s+/)
+    .map((w, i) => (i > 0 && SMALL.has(w.toLowerCase()) ? w.toLowerCase() : w[0].toUpperCase() + w.slice(1).toLowerCase()))
+    .join(" ");
+
+const properCase = (name: string) =>
+  name
+    .split(/\s+/)
+    .map((w) => (w.length <= 2 ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1).toLowerCase()))
+    .join(" ");
+
+function findName(lines: string[]): string | undefined {
+  const top = lines.slice(0, 14);
+  // "Name: Thandi Dlamini", "Account holder: ...", "Surname: ..."
+  for (const line of top) {
+    const m = /\b(?:full name|student name|employee name|customer name|account holder|holder|candidate|learner|patient|surname|name)\s*[:：]\s*([A-Za-z][A-Za-z'’.\- ]{2,40})/i.exec(line);
+    if (m) {
+      const v = m[1].replace(STOP, "").trim();
+      if (v.split(/\s+/).length >= 1 && v.length > 2) return v;
+    }
+  }
+  // "MR KP HLAHLA   PAGE: 1", "Dr J Smith"
+  const titled = new RegExp(`(?:^|\\s)(?:${TITLES})\\.?\\s+([A-Za-z][A-Za-z'’.\\-]*(?:\\s+[A-Za-z][A-Za-z'’.\\-]*){0,3})`, "i");
+  for (const line of top) {
+    const m = titled.exec(line);
+    if (!m) continue;
+    const v = m[1].replace(STOP, "").trim();
+    if (v.length > 2) return v;
+  }
+  // A line that is just a name: two to four capitalised words, no digits.
+  for (const line of top.slice(0, 8)) {
+    if (/\d|[:@/]/.test(line)) continue;
+    const w = line.split(/\s+/);
+    if (w.length < 2 || w.length > 4 || TYPES.test(line)) continue;
+    if (w.every((x) => /^[A-Z][A-Za-z'’.\-]+$/.test(x) && x.length > 1) && (line === line.toUpperCase() || w.every((x) => /^[A-Z][a-z'’.\-]+$/.test(x)))) return line;
+  }
+  return undefined;
+}
+
+function findType(lines: string[]): string | undefined {
+  for (const line of lines.slice(0, 4)) {
+    const t = line.replace(/\s+/g, " ").trim();
+    if (t.length < 3 || t.length > 40 || /\d{3,}/.test(t)) continue;
+    if (TYPES.test(t)) return titleCase(t.replace(/[:.]+$/, ""));
+  }
+  const first = lines[0]?.trim();
+  if (first && /^[A-Za-z][A-Za-z &/-]{2,28}$/.test(first) && first.split(/\s+/).length <= 3) return titleCase(first);
+  return undefined;
+}
+
+/** Names, identifiers and types read from the first page of each document. `starts` and `drop` are as in groupsFor. */
+export function describeDocs(rawPages: string[][], starts: number[], drop: number[] = []): DocInfo[] {
+  const pages = rawPages.map(clean);
+  const groups = groupsFor(starts, pages.length, drop);
+  const firsts = groups.map((g) => pages[g[0]]);
+  const infos: DocInfo[] = firsts.map((lines) => ({ name: findName(lines), type: findType(lines) }));
+
+  // An identifier that is different in every document: a labelled value first, then a long number.
+  const perDoc = firsts.map(labelledValues);
+  const labels = new Set(perDoc.flatMap((m) => [...m.keys()]));
+  let best: { label: string; values: string[]; rank: number } | undefined;
+  for (const label of labels) {
+    const values = perDoc.map((m) => m.get(label));
+    if (groups.length > 1 && (values.some((v) => !v) || new Set(values).size !== values.length)) continue;
+    if (groups.length === 1 && !values[0]) continue;
+    const digits = values.filter((v) => /\d{4,}/.test(v ?? "")).length / values.length;
+    if (digits < 0.8 && !ID_WORDS.test(label)) continue;
+    const rank = (ID_WORDS.test(label) ? 2 : 0) + digits;
+    if (!best || rank > best.rank) best = { label, values: values as string[], rank };
+  }
+  if (best) best.values.forEach((v, i) => (infos[i].id = v));
+  else {
+    const numbers = firsts.map((l) => /\b\d{6,}\b/.exec(l.join(" "))?.[0]);
+    if (groups.length > 1 && numbers.every(Boolean) && new Set(numbers).size === numbers.length) numbers.forEach((n, i) => (infos[i].id = n));
+  }
+  return infos;
+}
+
+export type NameScheme = "auto" | "id" | "name" | "name-id" | "type-id" | "type-name" | "part";
+
+export const SCHEMES: { id: NameScheme; label: string }[] = [
+  { id: "auto", label: "Automatic (best available)" },
+  { id: "id", label: "ID / account number" },
+  { id: "name", label: "Person's name" },
+  { id: "name-id", label: "Name and ID" },
+  { id: "type-id", label: "Document type and ID" },
+  { id: "type-name", label: "Document type and name" },
+  { id: "part", label: "Numbered (part 1, 2, 3…)" },
+];
+
+/** The file name (without .pdf) for document `k` (0-based). `prefix` is used only for numbered parts and as a last resort. */
+export function buildName(scheme: NameScheme, info: DocInfo, k: number, prefix: string): string {
+  const nm = info.name ? properCase(info.name) : undefined;
+  const bits = (...parts: (string | undefined)[]) => parts.filter(Boolean).map((p) => fileSafe(p!)).filter(Boolean).join("_");
+  const part = `${prefix}_part${k + 1}`;
+  switch (scheme) {
+    case "id":
+      return bits(info.id) || part;
+    case "name":
+      return bits(nm) || part;
+    case "name-id":
+      return bits(nm, info.id) || part;
+    case "type-id":
+      return bits(info.type, info.id) || part;
+    case "type-name":
+      return bits(info.type, nm) || part;
+    case "part":
+      return part;
+    default:
+      return bits(nm, info.id) || bits(info.id) || bits(nm) || (info.type ? bits(info.type, String(k + 1)) : "") || part;
+  }
+}

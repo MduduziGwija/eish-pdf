@@ -65,3 +65,46 @@ describe("auto split", () => {
     expect(fileSafe("22 30/74")).toBe("22_30_74");
   });
 });
+
+import { buildName, describeDocs } from "../src/core/autosplit";
+
+describe("naming documents", () => {
+  const statement = (student: string, name: string) => ["Statement", `${name}   PAGE: 1`, `Zebediela   Student: ${student}`, "Statement Date: 07-OCT-2026 14H16"];
+  const pages = [statement("2230741", "MR KP HLAHLA"), statement("2230132", "MS OM MAPHOTHOMA"), statement("2401765", "MRS A B DLAMINI")];
+
+  it("reads the name, the ID and the type from each first page", () => {
+    const info = describeDocs(pages, [0, 1, 2]);
+    expect(info.map((i) => i.name)).toEqual(["KP HLAHLA", "OM MAPHOTHOMA", "A B DLAMINI"]);
+    expect(info.map((i) => i.id)).toEqual(["2230741", "2230132", "2401765"]);
+    expect(info.every((i) => i.type === "Statement")).toBe(true);
+  });
+
+  it("names files by the chosen scheme", () => {
+    const [a] = describeDocs(pages, [0, 1, 2]);
+    expect(buildName("auto", a, 0, "fee")).toBe("KP_Hlahla_2230741");
+    expect(buildName("id", a, 0, "fee")).toBe("2230741");
+    expect(buildName("name", a, 0, "fee")).toBe("KP_Hlahla");
+    expect(buildName("type-id", a, 0, "fee")).toBe("Statement_2230741");
+    expect(buildName("type-name", a, 0, "fee")).toBe("Statement_KP_Hlahla");
+    expect(buildName("part", a, 4, "fee")).toBe("fee_part5");
+    expect(buildName("auto", {}, 2, "fee")).toBe("fee_part3");
+  });
+
+  it("finds a labelled name, and a type without a name or ID", () => {
+    const docs = [["Payslip", "Employee name: Thandi Dlamini", "Employee no: 40021"], ["Payslip", "Employee name: Sipho Ndlovu", "Employee no: 40022"]];
+    const info = describeDocs(docs, [0, 1]);
+    expect(info.map((i) => i.name)).toEqual(["Thandi Dlamini", "Sipho Ndlovu"]);
+    expect(info.map((i) => i.id)).toEqual(["40021", "40022"]);
+    const letters = describeDocs([["Certificate of Completion", "awarded for work"], ["Certificate of Completion", "awarded for effort"]], [0, 1]);
+    expect(letters[0].type).toBe("Certificate of Completion");
+    expect(buildName("auto", letters[0], 0, "x")).toBe("Certificate_of_Completion_1");
+  });
+});
+
+import { labelledValues } from "../src/core/autosplit";
+
+describe("labels", () => {
+  it("drops text that merely sits before the label", () => {
+    expect([...labelledValues(["ZEBEDIELA Student: 2230741", "Account number: 55", "Statement Date: 07-OCT-2026"]).keys()]).toEqual(["student", "account number"]);
+  });
+});
